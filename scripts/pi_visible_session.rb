@@ -33,6 +33,8 @@ module PiVisibleSession
       "--session",
       session,
       "run",
+      "--in-place",
+      "--close-replaced-pane",
       "--cwd",
       repo_root,
       "--name",
@@ -58,8 +60,6 @@ module PiVisibleSession
       exit 1
     end
 
-    close_other_terminal_panes(session, pane_id)
-    zellij("--session", session, "action", "focus-pane-id", pane_id)
     ghostty_opened = open_ghostty_attach(session, repo_root)
     warn "Ghostty auto-open unavailable; the review is still running. Attach manually with `#{zellij_shell_command("attach", session)}`." unless ghostty_opened
 
@@ -127,18 +127,6 @@ module PiVisibleSession
 
   def zellij_shell_command(*args)
     (["env", "ZELLIJ_SOCKET_DIR=#{ENV.fetch("ZELLIJ_SOCKET_DIR")}", "zellij"] + args).shelljoin
-  end
-
-  def close_other_terminal_panes(session, pane_id)
-    stdout, _stderr, status = zellij("--session", session, "action", "list-panes", allow_failure: true)
-    return unless status.success?
-
-    stdout.each_line do |line|
-      other_pane_id = line[/\A(terminal_\d+)\s+terminal\b/, 1]
-      next if other_pane_id.nil? || other_pane_id == pane_id
-
-      zellij("--session", session, "action", "close-pane", "--pane-id", other_pane_id, allow_failure: true)
-    end
   end
 
   def delete_zellij_session(session)
