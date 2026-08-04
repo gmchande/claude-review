@@ -5,8 +5,9 @@ module ClaudeReviewWaiter
   module_function
 
   TERMINAL_STATES = %w[0 1 130].freeze
+  LAUNCHER_GONE = "launcher_gone"
 
-  def wait(marker_path, after: nil, interval: 0.2, output: $stdout)
+  def wait(marker_path, after: nil, launch_marker: nil, interval: 0.2, output: $stdout)
     loop do
       snapshot = marker_snapshot(marker_path)
       state = snapshot&.first
@@ -14,9 +15,29 @@ module ClaudeReviewWaiter
         output.puts "Claude review finished with marker #{state}."
         return state
       end
+      if launch_marker && !launcher_alive?(launch_marker)
+        output.puts "Claude review launcher exited before a terminal marker."
+        return LAUNCHER_GONE
+      end
 
       sleep interval
     end
+  end
+
+  def launcher_alive?(path)
+    pid = Integer(File.read(path).strip, 10)
+    return false unless pid.positive?
+
+    Process.kill(0, pid)
+    true
+  rescue Errno::EPERM
+    true
+  rescue Errno::ENOENT, Errno::EACCES, Errno::ESRCH, ArgumentError
+    false
+  end
+
+  def live_launch_markers(run_dir)
+    Dir.glob(File.join(run_dir, "launched*")).select { |path| launcher_alive?(path) }
   end
 
   def marker_state(path)

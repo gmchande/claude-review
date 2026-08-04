@@ -45,7 +45,7 @@ Claude is pinned to `claude-opus-5` at `xhigh` effort and receives only `Read`, 
 - If the tool call yields a process handle, wait on that same process. Do not repeatedly inspect the marker or terminal, and do not ask the user to tell you when Claude is done. The local wait consumes no review-model tokens.
 - When the launcher returns, read the marker and handoff once. Read the terminal screen only when the user reports a problem and the marker is insufficient to diagnose it.
 - If the pane is gone and the marker remains ambiguous, report that and ask the user; never relaunch automatically.
-- Leave the session open for follow-ups until the user says it is finished. Start an approved follow-up with the printed `--resume-run` command so the existing session, viewer selection, fresh-turn marker, and watcher are reused together.
+- Keep the TUI open only while steering the current turn. Before an approved follow-up, close it with Ctrl+D, then use the printed `--resume-run` command; the launcher refuses to open the same session concurrently.
 - The per-run settings allowlist exposes Claude Opus 5. Do not choose Default or use `/model` to leave Opus 5. Confirm the TUI header shows Opus 5 with xhigh effort. If another model appears, reject the handoff and report the run as invalid.
 
 ## Verify and Stop

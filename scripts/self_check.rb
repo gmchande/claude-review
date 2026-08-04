@@ -236,6 +236,8 @@ end
 def test_completion_waiter
   dir = Dir.mktmpdir("cr-waiter-")
   marker_path = File.join(dir, "status")
+  launch_marker = File.join(dir, "launched")
+  File.write(launch_marker, "#{Process.pid}\n")
   output = StringIO.new
   writer = Thread.new do
     sleep 0.03
@@ -244,7 +246,7 @@ def test_completion_waiter
     File.write(marker_path, "0\n")
   end
 
-  state = ClaudeReviewWaiter.wait(marker_path, interval: 0.005, output: output)
+  state = ClaudeReviewWaiter.wait(marker_path, launch_marker: launch_marker, interval: 0.005, output: output)
   writer.join
   assert(state == "0", "waiter should return the completed marker")
   assert(output.string == "Claude review finished with marker 0.\n", "waiter should stay silent until completion")
@@ -263,10 +265,19 @@ def test_completion_waiter
     sleep 0.03
     File.write(marker_path, "0\n")
   end
-  state = ClaudeReviewWaiter.wait(marker_path, after: baseline, interval: 0.005, output: output)
+  state = ClaudeReviewWaiter.wait(marker_path, after: baseline, launch_marker: launch_marker, interval: 0.005, output: output)
   writer.join
   assert(state == "0", "a resumed wait should return the new completed marker")
   assert(output.string == "Claude review finished with marker 0.\n", "a resumed wait should ignore the stale completed marker")
+
+  dead_pid = Process.spawn(RbConfig.ruby, "-e", "exit 0")
+  Process.wait(dead_pid)
+  File.write(marker_path, "running\n")
+  File.write(launch_marker, "#{dead_pid}\n")
+  output = StringIO.new
+  state = ClaudeReviewWaiter.wait(marker_path, launch_marker: launch_marker, interval: 0.005, output: output)
+  assert(state == ClaudeReviewWaiter::LAUNCHER_GONE, "a dead launcher should end an ambiguous wait")
+  assert(output.string == "Claude review launcher exited before a terminal marker.\n", "dead launcher output")
 ensure
   writer&.join
   FileUtils.rm_rf(dir) if dir
@@ -275,13 +286,16 @@ end
 def test_supported_followup
   dir = Dir.mktmpdir("cr-followup-")
   marker_path = File.join(dir, "status")
+  handoff_path = File.join(dir, "handoff.md")
   prompt_log = File.join(dir, "prompt.log")
   command_file = File.join(dir, "cmux-command")
   File.write(marker_path, "0\n")
+  File.write(handoff_path, "stale review\n")
   write_executable(dir, "resume-review", <<~'SH')
     #!/bin/sh
+    test "$(sed -n '1p' "$FOLLOWUP_MARKER_PATH")" = running || exit 8
+    test ! -e "$FOLLOWUP_HANDOFF_PATH" || exit 9
     printf '%s' "$@" > "$FOLLOWUP_PROMPT_LOG"
-    printf 'running\n' > "$FOLLOWUP_MARKER_PATH"
     sleep 0.03
     printf '0\n' > "$FOLLOWUP_MARKER_PATH"
   SH
@@ -316,8 +330,25 @@ def test_supported_followup
     "CMUX_BUNDLED_CLI_PATH" => fake_cmux,
     "CMUX_COMMAND_FILE" => command_file,
     "FOLLOWUP_PROMPT_LOG" => prompt_log,
-    "FOLLOWUP_MARKER_PATH" => marker_path
+    "FOLLOWUP_MARKER_PATH" => marker_path,
+    "FOLLOWUP_HANDOFF_PATH" => handoff_path
   }
+
+  File.write(File.join(dir, "launched"), "#{Process.pid}\n")
+  active_stdout, active_stderr, active_status = Open3.capture3(
+    env,
+    RbConfig.ruby,
+    HELPER,
+    "--resume-run",
+    dir,
+    "--intent",
+    "Do not open concurrently",
+    chdir: File.expand_path("..", __dir__)
+  )
+  assert(!active_status.success?, "follow-up should refuse an already-open session: #{active_stdout}#{active_stderr}")
+  assert_includes(active_stderr, "still open in another terminal", "concurrent follow-up refusal")
+  FileUtils.rm_f(File.join(dir, "launched"))
+
   stdout, stderr, status = Open3.capture3(
     env,
     RbConfig.ruby,
@@ -335,6 +366,80 @@ def test_supported_followup
   assert(File.read(prompt_log) == "Review the corrected watcher", "follow-up should submit the supplied intent")
 ensure
   FileUtils.rm_rf(dir) if dir
+end
+
+def test_generated_resume_script_settles_early_failure
+  repo = init_repo
+  scratch = Dir.mktmpdir("cr-generated-resume-")
+  command_file = File.join(scratch, "cmux-command")
+  write(repo, "app.txt", "before\n")
+  commit_all(repo, "initial")
+  write(repo, "app.txt", "after\n")
+
+  fake_claude = write_executable(scratch, "claude", <<~'SH')
+    #!/bin/sh
+    case " $* " in
+      *" --resume "*) exit 7 ;;
+    esac
+    printf 'Initial review\n' > "$CLAUDE_REVIEW_HANDOFF_PATH"
+    printf '0\n' > "$CLAUDE_REVIEW_MARKER_PATH"
+  SH
+  fake_cmux = write_executable(scratch, "cmux", <<~'SH')
+    #!/bin/sh
+    case "$1" in
+      ping)
+        exit 0
+        ;;
+      --json)
+        printf '%s\n' '{"surface_ref":"surface:generated"}'
+        ;;
+      send)
+        last=''
+        for arg in "$@"; do last="$arg"; done
+        printf '%s\n' "$last" > "$CMUX_COMMAND_FILE"
+        ;;
+      send-key)
+        "$(sed -n '1p' "$CMUX_COMMAND_FILE")" >/dev/null 2>&1 &
+        ;;
+    esac
+  SH
+  env = {
+    "PATH" => "#{scratch}:#{ENV.fetch("PATH")}",
+    "TMPDIR" => scratch,
+    "CMUX_WORKSPACE_ID" => "workspace:generated",
+    "CMUX_SURFACE_ID" => "surface:caller",
+    "CMUX_BUNDLED_CLI_PATH" => fake_cmux,
+    "CMUX_COMMAND_FILE" => command_file
+  }
+
+  stdout, stderr, status = Open3.capture3(
+    env,
+    RbConfig.ruby,
+    HELPER,
+    "--intent",
+    "Generate a resumable review",
+    chdir: repo
+  )
+  assert(status.success?, "initial fake review should succeed: #{stdout}#{stderr}")
+  run_dir = Dir.glob(File.join(scratch, "claude-review", "run-*")).first
+  assert(run_dir, "initial fake review should create a private run")
+  resume_script = File.join(run_dir, "resume-review")
+  assert(File.executable?(resume_script), "initial fake review should generate an executable resume script")
+
+  deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2
+  launch_marker = File.join(run_dir, "launched")
+  while ClaudeReviewWaiter.launcher_alive?(launch_marker) && Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
+    sleep 0.01
+  end
+  assert(!ClaudeReviewWaiter.launcher_alive?(launch_marker), "initial fake Claude launcher should exit")
+
+  _resume_stdout, _resume_stderr, resume_status = Open3.capture3(env, resume_script, "Follow-up that fails before hooks", chdir: repo)
+  assert(!resume_status.success?, "fake resumed Claude should preserve its failure status")
+  assert(File.read(File.join(run_dir, "status")) == "1\n", "generated resume trailer should settle an early failure")
+  assert_includes(File.read(File.join(run_dir, "handoff.md")), "process status 7", "generated resume failure handoff")
+ensure
+  FileUtils.rm_rf(repo) if repo
+  FileUtils.rm_rf(scratch) if scratch
 end
 
 def test_review_scenarios
@@ -676,6 +781,7 @@ tests = [
   method(:test_claude_handoff_hook_tracks_interactive_turns),
   method(:test_completion_waiter),
   method(:test_supported_followup),
+  method(:test_generated_resume_script_settles_early_failure),
   method(:test_review_scenarios),
   method(:test_default_claude_configuration),
   method(:test_secret_untracked_skip),

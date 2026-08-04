@@ -533,12 +533,21 @@ def claude_interactive_shell_cmd(review_run, repo_roots, resume: false)
   launched_path = review_run[:launched].shellescape
   claude_command = cmd.shelljoin
   claude_command = "#{claude_command} \"$@\"" if resume
+  resume_setup = if resume
+                   [
+                     "rm -f #{handoff_path}",
+                     "printf 'running\\n' > #{marker_path}"
+                   ]
+                 else
+                   []
+                 end
 
   [
     "umask 077",
     "cd #{repo_roots.first.shellescape}",
     "printf '%s\\n' \"$$\" > #{launched_path}",
     *exports,
+    *resume_setup,
     claude_command,
     "rc=$?",
     "marker=$(sed -n '1p' #{marker_path} 2>/dev/null || true)",
@@ -582,11 +591,11 @@ def run_visible_review(system_prompt, payload, repo_root, included_repo_roots)
   puts "Marker: #{review_run[:marker]}"
   puts "Marker states: running=turn active or interrupted; 0=complete; 130=closed before completion; 1=failed."
   puts "Follow up in this exact session only with explicit user approval: #{File.expand_path($PROGRAM_NAME).shellescape} --resume-run #{review_run[:run_dir].shellescape} --intent 'FOLLOW-UP REVIEW INTENT'"
-  puts "Use the Claude TUI in that pane to interrupt, correct, follow up, or exit."
+  puts "Use the Claude TUI to interrupt or correct the active turn. After completion, exit it before using the printed follow-up command."
   puts "Waiting locally for Claude to finish; this does not run another model review."
   $stdout.flush
 
-  ClaudeReviewWaiter.wait(review_run[:marker])
+  ClaudeReviewWaiter.wait(review_run[:marker], launch_marker: review_run[:launched])
 end
 
 def run_visible_followup(run_dir, intent)
@@ -612,13 +621,19 @@ def run_visible_followup(run_dir, intent)
     warn "Use its printed resume script manually, or start a new review with explicit approval."
     exit 1
   end
+  live_launchers = ClaudeReviewWaiter.live_launch_markers(run_dir)
+  unless live_launchers.empty?
+    warn "This Claude review session is still open in another terminal."
+    warn "Close that Claude TUI with Ctrl+D before using --resume-run."
+    exit 1
+  end
 
   baseline = ClaudeReviewWaiter.marker_snapshot(review_run[:marker])
   followup_start = File.join(run_dir, "start-followup-#{SecureRandom.hex(6)}")
   command = [review_run[:resume], intent].shelljoin
   write_private_file(
     followup_start,
-    "#!/bin/zsh\numask 077\nprintf '%s\\n' \"$$\" > #{review_run[:launched].shellescape}\nexec #{command}\n"
+    "#!/bin/zsh\numask 077\nrm -f #{review_run[:handoff].shellescape}\nprintf 'running\\n' > #{review_run[:marker].shellescape}\nprintf '%s\\n' \"$$\" > #{review_run[:launched].shellescape}\nexec #{command}\n"
   )
   FileUtils.chmod(0o700, followup_start)
 
@@ -640,7 +655,7 @@ def run_visible_followup(run_dir, intent)
   puts "Waiting locally for this follow-up turn to finish."
   $stdout.flush
 
-  ClaudeReviewWaiter.wait(review_run[:marker], after: baseline)
+  ClaudeReviewWaiter.wait(review_run[:marker], after: baseline, launch_marker: review_run[:launched])
 end
 
 if options[:resume_run]
