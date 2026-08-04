@@ -1,7 +1,7 @@
 interface:
   display_name: "Claude Review"
-  short_description: "Single-session interactive Kimi review gate"
-  default_prompt: "Use $claude-review to run one interactive Kimi review, independently assess its findings, and checkpoint before editing."
+  short_description: "Native Claude Opus 5 review gate"
+  default_prompt: "Use $claude-review to run one visible Claude Opus 5 review, wait locally for its compact handoff, verify findings proportionally, and checkpoint before editing."
 
 policy:
   allow_implicit_invocation: false

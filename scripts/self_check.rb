@@ -4,11 +4,14 @@
 require "fileutils"
 require "json"
 require "open3"
+require "rbconfig"
+require "stringio"
 require "tmpdir"
-require_relative "pi_visible_session"
+require_relative "claude_visible_session"
+require_relative "wait_for_review"
 
 HELPER = File.expand_path("claude_review.rb", __dir__)
-HANDOFF_EXTENSION = File.expand_path("pi_review_handoff.ts", __dir__)
+HANDOFF_HOOK = File.expand_path("review_handoff_hook.rb", __dir__)
 
 def run_cmd(repo, *cmd, allow_failure: false)
   stdout, stderr, status = Open3.capture3(*cmd, chdir: repo)
@@ -60,75 +63,276 @@ def assert_includes(text, needle, label)
   assert(text.include?(needle), "#{label}: expected output to include #{needle.inspect}")
 end
 
-def test_pi_handoff_extension_tracks_interactive_turns
-  dir = Dir.mktmpdir("cr-pi-handoff-")
+def write_executable(directory, name, content)
+  path = File.join(directory, name)
+  File.binwrite(path, content)
+  FileUtils.chmod(0o700, path)
+  path
+end
+
+def with_env(values)
+  previous = values.to_h { |name, _value| [name, ENV[name]] }
+  values.each do |name, value|
+    value.nil? ? ENV.delete(name) : ENV[name] = value
+  end
+  yield
+ensure
+  previous.each do |name, value|
+    value.nil? ? ENV.delete(name) : ENV[name] = value
+  end
+end
+
+def invoke_handoff_hook(env, payload)
+  Open3.capture3(env, RbConfig.ruby, HANDOFF_HOOK, stdin_data: JSON.generate(payload))
+end
+
+def write_assistant_transcript(path, *models)
+  File.open(path, "w") do |file|
+    models.each do |model|
+      file.puts JSON.generate("type" => "assistant", "message" => { "model" => model })
+    end
+  end
+end
+
+def test_claude_handoff_hook_tracks_interactive_turns
+  dir = Dir.mktmpdir("cr-claude-handoff-")
   handoff_path = File.join(dir, "handoff.md")
-  done_marker_path = File.join(dir, "review.done")
-  script = <<~JAVASCRIPT
-    import { existsSync, readFileSync, statSync } from "node:fs";
+  marker_path = File.join(dir, "status")
+  transcript_path = File.join(dir, "session.jsonl")
+  write_assistant_transcript(transcript_path, "claude-opus-5")
+  env = {
+    "CLAUDE_REVIEW_HANDOFF_PATH" => handoff_path,
+    "CLAUDE_REVIEW_MARKER_PATH" => marker_path,
+    "CLAUDE_REVIEW_MODEL" => "claude-opus-5",
+    "CLAUDE_REVIEW_EFFORT" => "xhigh"
+  }
 
-    process.env.PI_REVIEW_HANDOFF_PATH = #{JSON.generate(handoff_path)};
-    process.env.PI_REVIEW_DONE_MARKER_PATH = #{JSON.generate(done_marker_path)};
+  _stdout, stderr, status = invoke_handoff_hook(env, "hook_event_name" => "SessionStart", "source" => "startup", "model" => "claude-opus-5")
+  assert(status.success?, "Claude SessionStart hook should succeed: #{stderr}")
 
-    const extensionModule = await import(`file://#{HANDOFF_EXTENSION}?self_check=${Date.now()}`);
-    const handlers = {};
-    const pi = { on(name, handler) { handlers[name] = handler; } };
-    const assistant = (text, stopReason = "stop") => ({
-      role: "assistant",
-      content: [{ type: "thinking", thinking: "private" }, { type: "text", text }],
-      stopReason,
-    });
+  File.write(handoff_path, "stale review\n")
+  _stdout, stderr, status = invoke_handoff_hook(env, "hook_event_name" => "UserPromptSubmit")
+  assert(status.success?, "Claude UserPromptSubmit hook should succeed: #{stderr}")
+  assert(!File.exist?(handoff_path), "prompt submit should clear the previous handoff")
+  assert(File.read(marker_path) == "running\n", "prompt submit should mark the review running")
+  assert((File.stat(marker_path).mode & 0o777) == 0o600, "running marker should be mode 0600")
 
-    extensionModule.default(pi);
+  _stdout, stderr, status = invoke_handoff_hook(
+    env,
+    "hook_event_name" => "Stop",
+    "transcript_path" => transcript_path,
+    "effort" => { "level" => "xhigh" },
+    "last_assistant_message" => "First review"
+  )
+  assert(status.success?, "Claude Stop hook should succeed: #{stderr}")
+  assert(File.read(handoff_path) == "First review\n", "Stop should write the completed assistant turn")
+  assert(File.read(marker_path) == "0\n", "Stop should write status 0")
+  assert((File.stat(handoff_path).mode & 0o777) == 0o600, "handoff should be mode 0600")
 
-    const settle = async (message) => {
-      await handlers.agent_start({});
-      const running = {
-        handoffCleared: !existsSync(process.env.PI_REVIEW_HANDOFF_PATH),
-        marker: readFileSync(process.env.PI_REVIEW_DONE_MARKER_PATH, "utf8"),
-        markerMode: statSync(process.env.PI_REVIEW_DONE_MARKER_PATH).mode & 0o777,
-      };
-      await handlers.agent_end({ messages: message ? [message] : [] });
-      await handlers.agent_settled({});
-      return {
-        running,
-        handoff: readFileSync(process.env.PI_REVIEW_HANDOFF_PATH, "utf8"),
-        marker: readFileSync(process.env.PI_REVIEW_DONE_MARKER_PATH, "utf8"),
-      };
-    };
+  invoke_handoff_hook(env, "hook_event_name" => "UserPromptSubmit")
+  write_assistant_transcript(transcript_path, "claude-opus-5", "<synthetic>")
+  invoke_handoff_hook(
+    env,
+    "hook_event_name" => "Stop",
+    "transcript_path" => transcript_path,
+    "effort" => { "level" => "xhigh" },
+    "last_assistant_message" => "Review after a synthetic retry"
+  )
+  assert(File.read(handoff_path) == "Review after a synthetic retry\n", "synthetic entries should not invalidate an Opus review")
+  assert(File.read(marker_path) == "0\n", "synthetic entries should not count as another model")
 
-    const first = await settle(assistant("First review"));
-    first.handoffMode = statSync(process.env.PI_REVIEW_HANDOFF_PATH).mode & 0o777;
-    first.markerMode = statSync(process.env.PI_REVIEW_DONE_MARKER_PATH).mode & 0o777;
-    const interrupted = await settle(assistant("Partial review", "aborted"));
-    const truncated = await settle(assistant("Cut off review", "length"));
-    const failed = await settle({ ...assistant("Partial provider output", "error"), errorMessage: "quota exceeded" });
-    const final = await settle(assistant("Corrected final review"));
+  invoke_handoff_hook(env, "hook_event_name" => "UserPromptSubmit")
+  write_assistant_transcript(transcript_path, "<synthetic>")
+  invoke_handoff_hook(
+    env,
+    "hook_event_name" => "Stop",
+    "transcript_path" => transcript_path,
+    "effort" => { "level" => "xhigh" },
+    "last_assistant_message" => "Synthetic-only review"
+  )
+  assert(File.read(marker_path) == "1\n", "synthetic-only transcripts should not supply model evidence")
+  assert_includes(File.read(handoff_path), "did not report an assistant model", "synthetic-only handoff")
 
-    console.log(JSON.stringify({ first, interrupted, truncated, failed, final }));
-  JAVASCRIPT
+  invoke_handoff_hook(env, "hook_event_name" => "UserPromptSubmit")
+  assert(File.read(marker_path) == "running\n", "an interrupted follow-up should remain running until another event")
+  assert(!File.exist?(handoff_path), "an interrupted follow-up should not leave a stale handoff")
 
-  stdout, stderr, status = Open3.capture3("bun", "-e", script)
-  assert(status.success?, "Pi handoff extension should load and run under Bun: #{stderr}")
+  invoke_handoff_hook(
+    env,
+    "hook_event_name" => "StopFailure",
+    "error" => "rate_limit",
+    "last_assistant_message" => "API Error: rate limit reached"
+  )
+  assert(File.read(marker_path) == "1\n", "StopFailure should write status 1")
+  assert_includes(File.read(handoff_path), "rate limit reached", "failed handoff")
+
+  invoke_handoff_hook(env, "hook_event_name" => "UserPromptSubmit")
+  write_assistant_transcript(transcript_path, "claude-opus-5", "claude-sonnet-5")
+  invoke_handoff_hook(
+    env,
+    "hook_event_name" => "Stop",
+    "transcript_path" => transcript_path,
+    "effort" => { "level" => "xhigh" },
+    "last_assistant_message" => "Mixed-model review"
+  )
+  assert(File.read(marker_path) == "1\n", "a mixed-model transcript should fail the handoff")
+  assert_includes(File.read(handoff_path), "not exclusively \"claude-opus-5\"", "mixed-model handoff")
+
+  invoke_handoff_hook(env, "hook_event_name" => "UserPromptSubmit")
+  invoke_handoff_hook(
+    env,
+    "hook_event_name" => "Stop",
+    "transcript_path" => File.join(dir, "missing.jsonl"),
+    "effort" => { "level" => "xhigh" },
+    "last_assistant_message" => "Unverifiable-model review"
+  )
+  assert(File.read(marker_path) == "1\n", "missing transcript model evidence should fail the handoff")
+  assert_includes(File.read(handoff_path), "did not report an assistant model", "missing-model handoff")
+
+  invoke_handoff_hook(env, "hook_event_name" => "UserPromptSubmit")
+  write_assistant_transcript(transcript_path, "claude-opus-5")
+  invoke_handoff_hook(
+    env,
+    "hook_event_name" => "Stop",
+    "transcript_path" => transcript_path,
+    "effort" => { "level" => "high" },
+    "last_assistant_message" => "Wrong effort review"
+  )
+  assert(File.read(marker_path) == "1\n", "unexpected effort should fail the handoff")
+  assert_includes(File.read(handoff_path), "not \"xhigh\"", "unexpected effort handoff")
+
+  invoke_handoff_hook(env, "hook_event_name" => "UserPromptSubmit")
+  invoke_handoff_hook(
+    env,
+    "hook_event_name" => "Stop",
+    "transcript_path" => transcript_path,
+    "effort" => "xhigh",
+    "last_assistant_message" => "Malformed effort review"
+  )
+  assert(File.read(marker_path) == "1\n", "malformed effort evidence should fail the handoff")
+  assert_includes(File.read(handoff_path), "did not report the turn effort", "malformed effort handoff")
+
+  invoke_handoff_hook(env, "hook_event_name" => "UserPromptSubmit")
+  invoke_handoff_hook(
+    env,
+    "hook_event_name" => "Stop",
+    "transcript_path" => transcript_path,
+    "effort" => { "level" => "xhigh" },
+    "last_assistant_message" => "Corrected final review"
+  )
+  assert(File.read(handoff_path) == "Corrected final review\n", "corrected follow-up should replace the handoff")
+  assert(File.read(marker_path) == "0\n", "corrected follow-up should replace failure with status 0")
+
+  stdout, stderr, status = invoke_handoff_hook(env, "hook_event_name" => "SessionStart", "source" => "resume", "model" => "claude-sonnet-5")
+  assert(status.success?, "model mismatch hook should return controlled JSON: #{stderr}")
   result = JSON.parse(stdout)
-  assert(result.dig("first", "running", "marker") == "running\n", "agent start should mark the review running")
-  assert(result.dig("first", "running", "handoffCleared"), "agent start should clear the previous handoff")
-  assert(result.dig("first", "running", "markerMode") == 0o600, "running marker should be mode 0600")
-  assert(result.dig("first", "handoff") == "First review\n", "handoff should contain the completed assistant turn")
-  assert(result.dig("first", "marker") == "0\n", "completed turn should write status 0")
-  assert(result.dig("first", "handoffMode") == 0o600, "handoff should be mode 0600")
-  assert(result.dig("first", "markerMode") == 0o600, "done marker should be mode 0600")
-  assert(result.dig("interrupted", "running", "marker") == "running\n", "an interrupted follow-up should start as running")
-  assert(result.dig("interrupted", "running", "handoffCleared"), "a follow-up should clear the previous handoff")
-  assert(result.dig("interrupted", "marker") == "130\n", "Escape-style abort should write status 130")
-  assert(result.dig("truncated", "running", "marker") == "running\n", "a follow-up should replace the interrupted marker")
-  assert(result.dig("truncated", "marker") == "1\n", "token-limit truncation should not look complete")
-  assert_includes(result.dig("truncated", "handoff"), "stop reason length", "truncated handoff")
-  assert(result.dig("failed", "marker") == "1\n", "provider error should write status 1")
-  assert(result.dig("failed", "handoff").start_with?("quota exceeded"), "provider error should lead the failed handoff")
-  assert(result.dig("final", "running", "marker") == "running\n", "a corrected follow-up should start as running")
-  assert(result.dig("final", "handoff") == "Corrected final review\n", "follow-up should replace the handoff")
-  assert(result.dig("final", "marker") == "0\n", "completed follow-up should replace status 130 with 0")
+  assert(result["continue"] == false, "model mismatch should stop the session")
+  assert(File.read(marker_path) == "1\n", "model mismatch should write status 1")
+  assert_includes(File.read(handoff_path), "not \"claude-opus-5\"", "model mismatch handoff")
+ensure
+  FileUtils.rm_rf(dir) if dir
+end
+
+def test_completion_waiter
+  dir = Dir.mktmpdir("cr-waiter-")
+  marker_path = File.join(dir, "status")
+  output = StringIO.new
+  writer = Thread.new do
+    sleep 0.03
+    File.write(marker_path, "running\n")
+    sleep 0.03
+    File.write(marker_path, "0\n")
+  end
+
+  state = ClaudeReviewWaiter.wait(marker_path, interval: 0.005, output: output)
+  writer.join
+  assert(state == "0", "waiter should return the completed marker")
+  assert(output.string == "Claude review finished with marker 0.\n", "waiter should stay silent until completion")
+
+  File.write(marker_path, "130\n")
+  output = StringIO.new
+  state = ClaudeReviewWaiter.wait(marker_path, interval: 0.005, output: output)
+  assert(state == "130", "waiter should return a closed-before-completion marker")
+
+  File.write(marker_path, "0\n")
+  baseline = ClaudeReviewWaiter.marker_snapshot(marker_path)
+  output = StringIO.new
+  writer = Thread.new do
+    sleep 0.03
+    File.write(marker_path, "running\n")
+    sleep 0.03
+    File.write(marker_path, "0\n")
+  end
+  state = ClaudeReviewWaiter.wait(marker_path, after: baseline, interval: 0.005, output: output)
+  writer.join
+  assert(state == "0", "a resumed wait should return the new completed marker")
+  assert(output.string == "Claude review finished with marker 0.\n", "a resumed wait should ignore the stale completed marker")
+ensure
+  writer&.join
+  FileUtils.rm_rf(dir) if dir
+end
+
+def test_supported_followup
+  dir = Dir.mktmpdir("cr-followup-")
+  marker_path = File.join(dir, "status")
+  prompt_log = File.join(dir, "prompt.log")
+  command_file = File.join(dir, "cmux-command")
+  File.write(marker_path, "0\n")
+  write_executable(dir, "resume-review", <<~'SH')
+    #!/bin/sh
+    printf '%s' "$@" > "$FOLLOWUP_PROMPT_LOG"
+    printf 'running\n' > "$FOLLOWUP_MARKER_PATH"
+    sleep 0.03
+    printf '0\n' > "$FOLLOWUP_MARKER_PATH"
+  SH
+  write_executable(dir, "claude", <<~'SH')
+    #!/bin/sh
+    exit 0
+  SH
+  fake_cmux = write_executable(dir, "cmux", <<~'SH')
+    #!/bin/sh
+    case "$1" in
+      ping)
+        exit 0
+        ;;
+      --json)
+        printf '%s\n' '{"surface_ref":"surface:followup"}'
+        ;;
+      send)
+        last=''
+        for arg in "$@"; do last="$arg"; done
+        printf '%s\n' "$last" > "$CMUX_COMMAND_FILE"
+        ;;
+      send-key)
+        "$(sed -n '1p' "$CMUX_COMMAND_FILE")" >/dev/null 2>&1 &
+        ;;
+    esac
+  SH
+
+  env = {
+    "PATH" => "#{dir}:#{ENV.fetch("PATH")}",
+    "CMUX_WORKSPACE_ID" => "workspace:followup",
+    "CMUX_SURFACE_ID" => "surface:caller",
+    "CMUX_BUNDLED_CLI_PATH" => fake_cmux,
+    "CMUX_COMMAND_FILE" => command_file,
+    "FOLLOWUP_PROMPT_LOG" => prompt_log,
+    "FOLLOWUP_MARKER_PATH" => marker_path
+  }
+  stdout, stderr, status = Open3.capture3(
+    env,
+    RbConfig.ruby,
+    HELPER,
+    "--resume-run",
+    dir,
+    "--intent",
+    "Review the corrected watcher",
+    chdir: File.expand_path("..", __dir__)
+  )
+  assert(status.success?, "supported follow-up should succeed: #{stdout}#{stderr}")
+  assert_includes(stdout, "Existing Claude Opus 5 review resumed.", "follow-up launch")
+  assert_includes(stdout, "Viewer: Cmux right split surface:followup", "follow-up viewer")
+  assert_includes(stdout, "Claude review finished with marker 0.", "follow-up completion")
+  assert(File.read(prompt_log) == "Review the corrected watcher", "follow-up should submit the supplied intent")
 ensure
   FileUtils.rm_rf(dir) if dir
 end
@@ -221,7 +425,7 @@ def test_review_scenarios
   end
 end
 
-def test_default_pi_configuration
+def test_default_claude_configuration
   repo = init_repo
   write(repo, "app.txt", "hello\n")
   commit_all(repo, "initial")
@@ -229,18 +433,138 @@ def test_default_pi_configuration
 
   output, status = dry_run(repo, "--intent", "Review defaults")
 
-  assert(status.success?, "default Pi configuration dry-run should succeed")
-  assert_includes(output, "Pi provider: moonshotai", "default provider")
-  assert_includes(output, "Pi model: kimi-k3", "default model")
-  assert_includes(output, "Pi thinking: max", "default thinking level")
-  assert_includes(output, "Runner: interactive Pi TUI in a visible Zellij session", "interactive runner")
-  assert_includes(output, "Pi tools: read,grep,find,ls", "review tool boundary")
+  assert(status.success?, "default Claude configuration dry-run should succeed")
+  assert_includes(output, "Claude model: claude-opus-5", "default model")
+  assert_includes(output, "Claude effort: xhigh", "default effort")
+  assert_includes(output, "Runner: native Claude TUI in a right-hand Cmux split or Ghostty tab", "native runner")
+  assert_includes(output, "Viewer selection: right-hand split inside Cmux; Ghostty tab otherwise", "viewer selection")
+  assert_includes(output, "Claude tools: Read,Grep,Glob", "review tool boundary")
+  assert_includes(output, "Permission mode: dontAsk", "permission mode")
+  assert_includes(output, "Workspace: primary repository; private run directory is auxiliary only", "workspace selection")
+  assert_includes(output, "Setting sources: explicit private settings only", "setting isolation")
+  assert_includes(output, "Selectable models: claude-opus-5", "model allowlist")
+  assert_includes(output, "Automatic model fallback: disabled", "automatic fallback")
+  assert_includes(output, "Handoff model validation: transcript must contain only claude-opus-5", "handoff model validation")
+  assert_includes(output, "Launch acknowledgement: required before reporting success", "launch acknowledgement")
+  assert_includes(File.read(HELPER), '"CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK" => "1"', "fallback environment")
+  assert(!output.include?("Bash"), "review tool boundary should exclude Bash")
+  assert(!output.include?("WebFetch"), "review tool boundary should exclude web tools")
+  assert(!output.include?("Agent"), "review tool boundary should exclude subagents")
   assert_includes(output, "Match review depth to the change's size, risk, and project context.", "proportional review prompt")
   assert_includes(output, "Use tools when needed to understand affected behavior", "review exploration prompt")
   assert_includes(output, "state the review limitation instead of claiming no actionable findings", "incomplete review prompt")
+  assert(!output.include?("Before reporting a finding, verify"), "Opus 5 prompt should not request redundant verification")
   assert(!output.match?(/at most \d+ tool calls/i), "review prompt should not contain a numeric tool-call budget")
 ensure
   FileUtils.rm_rf(repo) if repo
+end
+
+def test_native_viewer_selection
+  directory = Dir.mktmpdir("cr-viewer-")
+  cmux_log = File.join(directory, "cmux.log")
+  ghostty_log = File.join(directory, "osascript.log")
+  launch_marker = File.join(directory, "launched")
+  fake_cmux = write_executable(directory, "cmux", <<~SH)
+    #!/bin/sh
+    printf '%s\n' "$*" >> "$CMUX_LOG"
+    case "$*" in
+      "ping") exit 0 ;;
+      *"new-split right"*) printf '%s\n' '{"surface_ref":"surface:9"}' ;;
+      *"send-key"*" Enter"*)
+        if [ -n "$LAUNCH_MARKER" ]; then printf '%s\n' started > "$LAUNCH_MARKER"; fi
+        ;;
+    esac
+  SH
+  write_executable(directory, "osascript", <<~SH)
+    #!/bin/sh
+    if [ "$1" = "-e" ]; then exit 0; fi
+    tee "$GHOSTTY_LOG" >/dev/null
+    if [ -n "$LAUNCH_MARKER" ]; then printf '%s\n' started > "$LAUNCH_MARKER"; fi
+    printf '%s\n' 'tab:test'
+  SH
+
+  with_env(
+    "CMUX_WORKSPACE_ID" => "workspace:3",
+    "CMUX_SURFACE_ID" => "surface:8",
+    "CMUX_BUNDLED_CLI_PATH" => fake_cmux,
+    "CMUX_LOG" => cmux_log,
+    "LAUNCH_MARKER" => launch_marker
+  ) do
+    viewer = ClaudeVisibleSession.run_review(
+      shell_command: "/tmp/review-run/start-review",
+      run_dir: directory,
+      launch_marker: launch_marker
+    )
+    assert(viewer[:label] == "Cmux right split surface:9", "Cmux viewer should return the new right split")
+
+    FileUtils.rm_f(launch_marker)
+    with_env("LAUNCH_MARKER" => nil) do
+      viewer = ClaudeVisibleSession.open_cmux_split(
+        fake_cmux,
+        "/tmp/review-run/start-review",
+        launch_marker,
+        launch_timeout: 0.01
+      )
+      assert(viewer.nil?, "Cmux should reject a split whose launcher never acknowledges startup")
+
+      previous_stderr = $stderr
+      captured_stderr = StringIO.new
+      begin
+        $stderr = captured_stderr
+        begin
+          ClaudeVisibleSession.run_review(
+            shell_command: "/tmp/review-run/start-review",
+            run_dir: directory,
+            launch_marker: launch_marker,
+            launch_timeout: 0.01,
+            recovery_paths: {
+              "Handoff" => "/tmp/review-run/handoff.md",
+              "Marker" => "/tmp/review-run/status",
+              "Resume command" => "/tmp/review-run/resume-review"
+            }
+          )
+          assert(false, "a launch timeout should stop the launcher")
+        rescue SystemExit => e
+          assert(e.status == 1, "a launch timeout should exit with status 1")
+        end
+      ensure
+        $stderr = previous_stderr
+      end
+      assert_includes(captured_stderr.string, "Handoff: /tmp/review-run/handoff.md", "launch failure recovery handoff")
+      assert_includes(captured_stderr.string, "Marker: /tmp/review-run/status", "launch failure recovery marker")
+      assert_includes(captured_stderr.string, "Resume command: /tmp/review-run/resume-review", "launch failure recovery command")
+    end
+  end
+  cmux = File.read(cmux_log)
+  assert_includes(cmux, "--json new-split right --workspace workspace:3 --surface surface:8 --focus true", "Cmux right split")
+  assert_includes(cmux, "send --workspace workspace:3 --surface surface:9 /tmp/review-run/start-review", "Cmux command delivery")
+  assert_includes(cmux, "send-key --workspace workspace:3 --surface surface:9 Enter", "Cmux command submission")
+  assert_includes(cmux, "close-surface --workspace workspace:3 --surface surface:9", "Cmux launch timeout cleanup")
+  assert(!cmux.include?("new-surface"), "Cmux viewer should not create a tab")
+  assert(!cmux.include?("CLAUDE_REVIEW_HANDOFF_PATH"), "Cmux should receive only the short launcher path")
+
+  with_env(
+    "PATH" => "#{directory}:#{ENV.fetch("PATH")}",
+    "CMUX_WORKSPACE_ID" => nil,
+    "CMUX_SURFACE_ID" => nil,
+    "CMUX_BUNDLED_CLI_PATH" => nil,
+    "GHOSTTY_LOG" => ghostty_log,
+    "LAUNCH_MARKER" => launch_marker
+  ) do
+    viewer = ClaudeVisibleSession.run_review(
+      shell_command: "/tmp/review-run/start-review",
+      run_dir: directory,
+      launch_marker: launch_marker
+    )
+    assert(viewer[:label] == "Ghostty tab tab:test", "outside Cmux the viewer should open a Ghostty tab")
+  end
+  ghostty = File.read(ghostty_log)
+  assert_includes(ghostty, "tell application \"Ghostty\"", "Ghostty AppleScript")
+  assert_includes(ghostty, "/tmp/review-run/start-review", "Ghostty command delivery")
+  assert(!ghostty.include?("CLAUDE_REVIEW_HANDOFF_PATH"), "Ghostty should receive only the short launcher path")
+  assert(!ghostty.downcase.include?("zellij"), "Ghostty viewer should not use Zellij")
+ensure
+  FileUtils.rm_rf(directory) if directory
 end
 
 def test_secret_untracked_skip
@@ -299,28 +623,13 @@ ensure
   FileUtils.rm_rf(parent) if parent
 end
 
-def test_socket_dir_defaults_without_shell_setup
-  previous = ENV.delete("ZELLIJ_SOCKET_DIR")
-  socket_dir = PiVisibleSession.ensure_zellij_socket_dir!
-
-  assert(socket_dir == "/tmp/zellij-#{Process.uid}", "socket dir should use the short stable per-user default")
-  assert(Dir.exist?(socket_dir), "socket dir should be created")
-  socket_command = PiVisibleSession.zellij_shell_command("list-sessions")
-  assert_includes(socket_command, "ZELLIJ_SOCKET_DIR", "socket-aware command")
-  assert_includes(socket_command, socket_dir, "socket-aware command")
-ensure
-  if previous
-    ENV["ZELLIJ_SOCKET_DIR"] = previous
-  else
-    ENV.delete("ZELLIJ_SOCKET_DIR")
-  end
-end
-
 def test_include_repo_bundles_related_diff
   primary = init_repo
   related = init_repo
 
   write(primary, "primary.txt", "before\n")
+  write(primary, "docs/plan.md", "# Plan\n\nCoordinate both repositories.\n")
+  write(primary, "docs/workflow.md", "# Workflow\n\nUpdate the related repository.\n")
   commit_all(primary, "initial primary")
 
   write(related, "AGENTS.md", "# Related guidance\n\nPreserve historical notes.\n")
@@ -339,7 +648,22 @@ def test_include_repo_bundles_related_diff
   assert_includes(output, "+after", "include repo diff")
   assert_includes(output, "new related context", "include repo untracked")
 
+  plan_output, plan_status = dry_run(primary, "--include-repo", related, "--plan", "docs/plan.md", "--intent", "Review both repos against the plan")
+  assert(plan_status.success?, "include-repo plan dry-run should succeed")
+  assert_includes(plan_output, "Review target: clean primary working tree with included repositories", "include repo plan target")
+  assert_includes(plan_output, "Plan supporting context: docs/plan.md", "include repo plan role")
+
+  artifact_output, artifact_status = dry_run(primary, "--include-repo", related, "--artifact", "docs/workflow.md", "--intent", "Review both repos and the workflow")
+  assert(artifact_status.success?, "include-repo artifact dry-run should succeed")
+  assert_includes(artifact_output, "Review target: clean primary working tree with included repositories", "include repo artifact target")
+  assert_includes(artifact_output, "Artifact under review: docs/workflow.md", "include repo artifact")
+
   commit_all(related, "related changes")
+
+  plan_only_output, plan_only_status = dry_run(primary, "--include-repo", related, "--plan", "docs/plan.md")
+  assert(plan_only_status.success?, "plan-only dry-run with clean included repos should succeed")
+  assert_includes(plan_only_output, "Review target: plan docs/plan.md", "plan only with clean included repos")
+
   clean_output, clean_status = dry_run(primary, "--include-repo", related, "--intent", "Review both repos", allow_failure: true)
   assert(!clean_status.success?, "all-clean included repos should not create an empty review")
   assert_includes(clean_output, "No diff content found to review.", "all-clean include repo")
@@ -349,12 +673,14 @@ ensure
 end
 
 tests = [
-  method(:test_pi_handoff_extension_tracks_interactive_turns),
+  method(:test_claude_handoff_hook_tracks_interactive_turns),
+  method(:test_completion_waiter),
+  method(:test_supported_followup),
   method(:test_review_scenarios),
-  method(:test_default_pi_configuration),
+  method(:test_default_claude_configuration),
   method(:test_secret_untracked_skip),
   method(:test_project_context_includes_parent_and_repo_authority_files),
-  method(:test_socket_dir_defaults_without_shell_setup),
+  method(:test_native_viewer_selection),
   method(:test_include_repo_bundles_related_diff)
 ]
 
