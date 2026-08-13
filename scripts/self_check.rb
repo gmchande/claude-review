@@ -555,10 +555,13 @@ def test_default_claude_configuration
   assert(!output.include?("Bash"), "review tool boundary should exclude Bash")
   assert(!output.include?("WebFetch"), "review tool boundary should exclude web tools")
   assert(!output.include?("Agent"), "review tool boundary should exclude subagents")
-  assert_includes(output, "Match review depth to the change's size, risk, and project context.", "proportional review prompt")
+  assert_includes(output, "Do not widen the task into a general production, security, or scale audit.", "scoped review prompt")
+  assert_includes(output, "Do not self-filter to high-severity only.", "report-all review prompt")
   assert_includes(output, "Use tools when needed to understand affected behavior", "review exploration prompt")
   assert_includes(output, "state the review limitation instead of claiming no actionable findings", "incomplete review prompt")
   assert(!output.include?("Before reporting a finding, verify"), "Opus 5 prompt should not request redundant verification")
+  assert(!output.include?("unsafe or incomplete"), "Opus 5 prompt should not score plans as production checklists")
+  assert(!output.include?("Continue until material risks are assessed"), "Opus 5 prompt should not request over-verification")
   assert(!output.match?(/at most \d+ tool calls/i), "review prompt should not contain a numeric tool-call budget")
 ensure
   FileUtils.rm_rf(repo) if repo

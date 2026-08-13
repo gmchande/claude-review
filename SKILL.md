@@ -15,11 +15,11 @@ Do not edit, format, generate, stage, commit, or push before the verification ch
 
 1. Run from the primary repo root.
 2. If this task already has a printed Claude session, keep using it. Never launch another review or retry a failed run without the user's explicit approval.
-3. Launch one review with host access. A sandboxed launch cannot use the Cmux control socket, Ghostty automation, or the user's Claude login.
+3. Launch one review with host access. A sandboxed launch cannot use the Cmux control socket, Ghostty automation, or the user's Claude login. `--intent` names the slice and audience. Do not ask Claude to make the work "safe," "complete," or enterprise-grade.
 
 ```sh
 /path/to/claude-review/scripts/claude_review.rb \
-  --intent "Short description of the change"
+  --intent "What this slice is, in this project"
 ```
 
 Useful options:
@@ -53,9 +53,9 @@ Claude is pinned to `claude-opus-5` at `xhigh` effort and receives only `Read`, 
 After the latest marker contains `0`:
 
 1. Read the findings-only handoff first, then inspect the changed-file summary.
-2. Verify each finding against its cited lines, necessary surrounding logic, and directly relevant tests or callers. Do not reload the full review bundle or duplicate Claude's broad review.
+2. Check each finding against its cited lines, necessary surrounding logic, and directly relevant tests or callers. Do not reload the full review bundle or duplicate Claude's broad review. This wrapping-agent pass is the filter; do not send the work back through Claude to verify itself.
 3. Make one bounded independent pass over the changed boundaries, immediate callers, and focused tests to catch material omissions. Expand further only when a finding cannot otherwise be resolved or a material risk is clearly under-reviewed. Apply the same proportional check across included repositories and supplied artifacts.
-4. Classify each finding as accepted, rejected, or deferred. Judge Claude's depth and priorities, identify material omissions, and reject pedantry, speculation, or unnecessary redesign.
+4. Classify each finding as accepted, rejected, or deferred. Judge on correctness, workflow pain, and speculative value — not on whether the fix is cheap. Opus 5 extra findings are often real in the abstract; still reject speculative hardening this slice did not earn (generic CSRF, origin-IP threat models, validation theater, concurrency architecture the change did not introduce). Reject pedantry, speculation, and unnecessary redesign.
 5. Report this checkpoint and stop:
 
 ```md
