@@ -1,11 +1,11 @@
 ---
 name: claude-review
-description: Single-session Claude Opus 5 review gate for a current diff, branch, plan, artifact, or coordinated multi-repo change. Launch one visible read-only Claude TUI in a right-hand Cmux split or Ghostty tab, let the user steer it, independently judge its findings against the real files, and stop for approval before editing.
+description: Single-session Claude Fable 5 review gate for a current diff, branch, plan, artifact, or coordinated multi-repo change. Launch one visible read-only Claude TUI in a right-hand Cmux split, a Ghostty right split, or a Ghostty tab, let the user steer it, independently judge its findings against the real files, and stop for approval before editing.
 ---
 
 # Claude Review
 
-Run one independent Claude Opus 5 review in a native terminal pane. Treat its findings as input, not authority.
+Run one independent Claude Fable 5 review in a native terminal pane. Treat its findings as input, not authority.
 
 ## Gate
 
@@ -31,11 +31,11 @@ Useful options:
 - `--resume-run PATH --intent TEXT` reuses the exact printed Claude session for an approved follow-up, opens it in the viewer selected from the current environment, and waits for that new turn.
 - `--dry-run` prints the bundle without launching Claude.
 
-Inside Cmux, the launcher opens a vertical terminal split on the right. Otherwise it opens a Ghostty tab. It does not use Zellij. The launcher prints the viewer, handoff path, marker path, and exact resume command.
+Inside Cmux, the launcher opens a vertical terminal split on the right. Inside Ghostty, it opens a right-hand split in the current tab. Otherwise it opens a Ghostty tab. It does not use Zellij. The launcher prints the viewer, handoff path, marker path, and exact resume command.
 
 Claude starts in the primary repository, not the temporary run directory. The private run directory contains only the bundled request, per-run settings, launcher, launch acknowledgement, marker, and handoff. The launcher reports success only after `start-review` acknowledges that it executed.
 
-Claude is pinned to `claude-opus-5` at `xhigh` effort and receives only `Read`, `Grep`, and `Glob`. Bash, editing, web, MCP, subagent tools, and automatic model fallback are unavailable. The handoff is rejected if the recorded transcript contains another real assistant model or no real assistant-model evidence. Claude Code's synthetic error entries are not models. Likely credential paths are excluded from untracked bundles, but this is not a secrets scanner.
+Claude is pinned to `claude-fable-5` at `high` effort and receives only `Read`, `Grep`, and `Glob`. Bash, editing, web, MCP, subagent tools, and automatic model fallback are unavailable. The handoff is rejected if the recorded transcript contains another real assistant model or no real assistant-model evidence. Claude Code's synthetic error entries are not models. Likely credential paths are excluded from untracked bundles, but this is not a secrets scanner.
 
 ## Observe
 
@@ -46,7 +46,7 @@ Claude is pinned to `claude-opus-5` at `xhigh` effort and receives only `Read`, 
 - When the launcher returns, read the marker and handoff once. Read the terminal screen only when the user reports a problem and the marker is insufficient to diagnose it.
 - If the pane is gone and the marker remains ambiguous, report that and ask the user; never relaunch automatically.
 - Keep the TUI open only while steering the current turn. Before an approved follow-up, close it with Ctrl+D, then use the printed `--resume-run` command; the launcher refuses to open the same session concurrently.
-- The per-run settings allowlist exposes Claude Opus 5. Do not choose Default or use `/model` to leave Opus 5. Confirm the TUI header shows Opus 5 with xhigh effort. If another model appears, reject the handoff and report the run as invalid.
+- The per-run settings allowlist exposes Claude Fable 5. Do not choose Default or use `/model` to leave Fable 5. Confirm the TUI header shows Fable 5 with high effort. If another model appears, reject the handoff and report the run as invalid.
 
 ## Verify and Stop
 
@@ -55,7 +55,7 @@ After the latest marker contains `0`:
 1. Read the findings-only handoff first, then inspect the changed-file summary.
 2. Check each finding against its cited lines, necessary surrounding logic, and directly relevant tests or callers. Do not reload the full review bundle or duplicate Claude's broad review. This wrapping-agent pass is the filter; do not send the work back through Claude to verify itself.
 3. Make one bounded independent pass over the changed boundaries, immediate callers, and focused tests to catch material omissions. Expand further only when a finding cannot otherwise be resolved or a material risk is clearly under-reviewed. Apply the same proportional check across included repositories and supplied artifacts.
-4. Classify each finding as accepted, rejected, or deferred. Judge on correctness, workflow pain, and speculative value — not on whether the fix is cheap. Opus 5 extra findings are often real in the abstract; still reject speculative hardening this slice did not earn (generic CSRF, origin-IP threat models, validation theater, concurrency architecture the change did not introduce). Reject pedantry, speculation, and unnecessary redesign.
+4. Classify each finding as accepted, rejected, or deferred. Judge on correctness, workflow pain, and speculative value — not on whether the fix is cheap. Fable 5 extra findings are often real in the abstract; still reject speculative hardening this slice did not earn (generic CSRF, origin-IP threat models, validation theater, concurrency architecture the change did not introduce). Reject pedantry, speculation, and unnecessary redesign.
 5. Report this checkpoint and stop:
 
 ```md

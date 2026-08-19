@@ -19,8 +19,8 @@ MAX_UNTRACKED_BUNDLE_BYTES = 500_000
 AUTHORITY_CONTEXT_FILES = %w[AGENTS.md CLAUDE.md].freeze
 MAX_PROJECT_CONTEXT_FILE_BYTES = 120_000
 MAX_PROJECT_CONTEXT_BUNDLE_BYTES = 240_000
-CLAUDE_MODEL = "claude-opus-5"
-CLAUDE_EFFORT = "xhigh"
+CLAUDE_MODEL = "claude-fable-5"
+CLAUDE_EFFORT = "high"
 CLAUDE_PERMISSION_MODE = "dontAsk"
 CLAUDE_REVIEW_TOOLS = "Read,Grep,Glob"
 CLAUDE_SETTING_SOURCES = ""
@@ -505,7 +505,7 @@ def claude_args(review_run, repo_roots, resume: false)
     review_run[:run_dir],
     *repo_roots,
     "--name",
-    "Claude Opus 5 Review"
+    "Claude Fable 5 Review"
   ]
 
   if resume
@@ -583,7 +583,7 @@ def run_visible_review(system_prompt, payload, repo_root, included_repo_roots)
     }
   )
 
-  puts "Visible Claude Opus 5 review started."
+  puts "Visible Claude Fable 5 review started."
   puts "Viewer: #{viewer.fetch(:label)}"
   puts "Prompt bundle: #{review_run[:prompt]}"
   puts "Run settings: #{review_run[:settings]}"
@@ -648,7 +648,7 @@ def run_visible_followup(run_dir, intent)
     }
   )
 
-  puts "Existing Claude Opus 5 review resumed."
+  puts "Existing Claude Fable 5 review resumed."
   puts "Viewer: #{viewer.fetch(:label)}"
   puts "Handoff: #{review_run[:handoff]}"
   puts "Marker: #{review_run[:marker]}"
@@ -780,8 +780,9 @@ PROMPT
 if options[:dry_run]
   puts "Claude model: #{CLAUDE_MODEL}"
   puts "Claude effort: #{CLAUDE_EFFORT}"
-  puts "Runner: native Claude TUI in a right-hand Cmux split or Ghostty tab"
-  puts "Viewer selection: right-hand split inside Cmux; Ghostty tab otherwise"
+  puts "Runner: native Claude TUI in a right-hand Cmux split, Ghostty right split, or Ghostty tab"
+  puts "Viewer selection: right-hand split inside Cmux; Ghostty right split when already in Ghostty; Ghostty tab otherwise"
+  puts "Current viewer: #{ClaudeVisibleSession.current_viewer_name}"
   puts "Claude tools: #{CLAUDE_REVIEW_TOOLS}"
   puts "Permission mode: #{CLAUDE_PERMISSION_MODE}"
   puts "Workspace: primary repository; private run directory is auxiliary only"

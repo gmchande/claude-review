@@ -7,7 +7,7 @@ require "shellwords"
 module ClaudeVisibleSession
   module_function
 
-  PANE_NAME = "Claude Opus 5 Review"
+  PANE_NAME = "Claude Fable 5 Review"
   LAUNCH_ACK_TIMEOUT = 5.0
 
   def preflight!
@@ -23,7 +23,7 @@ module ClaudeVisibleSession
     viewer = if cmux_context?
                open_cmux_split(ensure_cmux_ready!, shell_command, launch_marker, launch_timeout: launch_timeout)
              else
-               open_ghostty_tab(shell_command, run_dir, launch_marker, launch_timeout: launch_timeout)
+               open_ghostty_viewer(shell_command, run_dir, launch_marker, launch_timeout: launch_timeout)
              end
 
     return viewer if viewer
@@ -38,6 +38,20 @@ module ClaudeVisibleSession
   def cmux_context?
     !ENV.fetch("CMUX_WORKSPACE_ID", "").strip.empty? &&
       !ENV.fetch("CMUX_SURFACE_ID", "").strip.empty?
+  end
+
+  def ghostty_context?
+    ENV.fetch("TERM_PROGRAM", "").strip.casecmp("ghostty").zero?
+  end
+
+  def current_viewer_name
+    if cmux_context?
+      "Cmux right split"
+    elsif ghostty_context?
+      "Ghostty right split"
+    else
+      "Ghostty tab"
+    end
   end
 
   def cmux_command_path
@@ -224,44 +238,132 @@ module ClaudeVisibleSession
     exit 1
   end
 
-  def open_ghostty_tab(shell_command, run_dir, launch_marker, launch_timeout: LAUNCH_ACK_TIMEOUT)
+  def open_ghostty_viewer(shell_command, run_dir, launch_marker, launch_timeout: LAUNCH_ACK_TIMEOUT)
     return nil unless ghostty_available?
 
+    split = ghostty_context?
     launch_command = "#{command_path("zsh").shellescape} -lc #{shell_command.shellescape}"
+    create_surface = if split
+                       <<~APPLESCRIPT
+                         set currentTerm to focused terminal of selected tab of front window
+                         set newTerm to split currentTerm direction right with configuration cfg
+                         focus newTerm
+                         set newTabID to id of selected tab of front window
+                         set newTermID to id of newTerm
+                       APPLESCRIPT
+                     else
+                       <<~APPLESCRIPT
+                         if (count of windows) > 0 then
+                           set newTab to new tab in front window with configuration cfg
+                           select tab newTab
+                           set newTabID to id of newTab
+                           set newTermID to id of focused terminal of newTab
+                         else
+                           set newWin to new window with configuration cfg
+                           set newTabID to id of selected tab of newWin
+                           set newTermID to id of focused terminal of selected tab of newWin
+                         end if
+                         activate
+                       APPLESCRIPT
+                     end
     script = <<~APPLESCRIPT
       tell application "Ghostty"
         set cfg to new surface configuration
         set initial working directory of cfg to #{applescript_string(run_dir)}
         set command of cfg to #{applescript_string(launch_command)}
         set wait after command of cfg to true
-        if (count of windows) > 0 then
-          set newTab to new tab in front window with configuration cfg
-          select tab newTab
-          set newTabID to id of newTab
-        else
-          set newWin to new window with configuration cfg
-          set newTabID to id of selected tab of newWin
-        end if
-        activate
-        return newTabID
+        #{create_surface.chomp}
+        return (newTabID as text) & linefeed & (newTermID as text)
       end tell
     APPLESCRIPT
 
     stdout, stderr, status = run_command("osascript", allow_failure: true, stdin_data: script)
-    if status.success?
-      tab_id = stdout.strip
-      if wait_for_launch(launch_marker, timeout: launch_timeout)
-        return { label: tab_id.empty? ? "Ghostty tab" : "Ghostty tab #{tab_id}" }
-      end
-
-      warn "Ghostty opened the Claude review tab, but the launcher did not acknowledge startup within #{launch_timeout} seconds."
-      warn "Close the empty or stalled Ghostty tab manually."
+    unless status.success?
+      warn "Failed to open the Ghostty Claude review #{split ? "split" : "tab"}."
+      warn stderr unless stderr.empty?
       return nil
     end
 
-    warn "Failed to open the Ghostty Claude review tab."
-    warn stderr unless stderr.empty?
+    tab, terminal = stdout.to_s.split(/\r?\n/).map(&:strip).reject(&:empty?)
+    viewer = {
+      label: ghostty_label(placement: split ? "split" : "tab", tab: tab.to_s, terminal: terminal.to_s),
+      tab: tab.to_s,
+      terminal: terminal.to_s,
+      placement: split ? "split" : "tab"
+    }
+    return viewer if wait_for_launch(launch_marker, timeout: launch_timeout)
+
+    warn "Ghostty opened the Claude review #{split ? "split" : "tab"}, but the launcher did not acknowledge startup within #{launch_timeout} seconds."
+    close_ghostty_viewer(viewer)
     nil
+  end
+
+  def ghostty_label(placement:, tab:, terminal:)
+    if placement == "split"
+      target = terminal.empty? ? tab : terminal
+      target.empty? ? "Ghostty right split" : "Ghostty right split #{target}"
+    else
+      target = tab.empty? ? terminal : tab
+      target.empty? ? "Ghostty tab" : "Ghostty tab #{target}"
+    end
+  end
+
+  def close_ghostty_viewer(viewer)
+    terminal = viewer[:terminal].to_s.strip
+    tab = viewer[:tab].to_s.strip
+    if viewer[:placement] == "split"
+      if terminal.empty?
+        warn "Close the empty or stalled #{viewer[:label]} manually."
+        return
+      end
+      script = <<~APPLESCRIPT
+        on run argv
+          set targetID to item 1 of argv
+          tell application "Ghostty"
+            repeat with currentWindow in windows
+              repeat with currentTab in tabs of currentWindow
+                repeat with currentTerminal in terminals of currentTab
+                  if (id of currentTerminal as text) is targetID then
+                    close currentTerminal
+                    return id of currentTerminal
+                  end if
+                end repeat
+              end repeat
+            end repeat
+            error "Recorded Ghostty split is no longer open"
+          end tell
+        end run
+      APPLESCRIPT
+      target = terminal
+    else
+      if tab.empty?
+        warn "Close the empty or stalled #{viewer[:label]} manually."
+        return
+      end
+      script = <<~APPLESCRIPT
+        on run argv
+          set targetID to item 1 of argv
+          tell application "Ghostty"
+            repeat with currentWindow in windows
+              repeat with currentTab in tabs of currentWindow
+                if (id of currentTab as text) is targetID then
+                  close tab currentTab
+                  return targetID
+                end if
+              end repeat
+            end repeat
+            error "Recorded Ghostty tab is no longer open"
+          end tell
+        end run
+      APPLESCRIPT
+      target = tab
+    end
+
+    _stdout, stderr, status = run_command("osascript", "-", target, allow_failure: true, stdin_data: script)
+    return if status.success?
+
+    warn "Close the empty or stalled #{viewer[:label]} manually."
+    warn stderr unless stderr.empty?
   end
 
   def ensure_required_command!(name)

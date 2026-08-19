@@ -1,17 +1,17 @@
 # claude-review
 
-A Codex skill that opens one read-only Claude Opus 5 review in a visible terminal, then returns Claude's findings to Codex for independent verification before any edits.
+A Codex skill that opens one read-only Claude Fable 5 review in a visible terminal, then returns Claude's findings to Codex for independent verification before any edits.
 
 ## Requirements
 
 - macOS
 - Codex
-- Claude Code, signed in with access to Opus 5
+- Claude Code, signed in with access to Fable 5
 - Git, Ruby, and zsh
 - Cmux or Ghostty
 - Permission for Codex to run the launcher with host access so it can use the terminal app and your Claude login
 
-Inside Cmux, Claude opens in a right-hand split. From the Codex app or anywhere else, it opens in a Ghostty tab.
+Inside Cmux, Claude opens in a right-hand split. Inside Ghostty, it opens a right-hand split in the current tab. From the Codex app or anywhere else, it opens in a Ghostty tab.
 
 ## Install
 
@@ -37,7 +37,7 @@ The runner also supports plans, artifacts, committed branch work, and coordinate
 ~/.agents/skills/claude-review/scripts/claude_review.rb --help
 ```
 
-Claude is pinned to `claude-opus-5` at `xhigh` effort with only `Read`, `Grep`, and `Glob`. It cannot edit files, run shell commands, browse the web, use MCP servers, or switch models.
+Claude is pinned to `claude-fable-5` at `high` effort with only `Read`, `Grep`, and `Glob`. It cannot edit files, run shell commands, browse the web, use MCP servers, or switch models.
 
 The runner skips likely credential filenames when bundling untracked files, but it is not a secrets scanner. Review only repositories you trust.
 

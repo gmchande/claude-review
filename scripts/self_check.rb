@@ -99,15 +99,15 @@ def test_claude_handoff_hook_tracks_interactive_turns
   handoff_path = File.join(dir, "handoff.md")
   marker_path = File.join(dir, "status")
   transcript_path = File.join(dir, "session.jsonl")
-  write_assistant_transcript(transcript_path, "claude-opus-5")
+  write_assistant_transcript(transcript_path, "claude-fable-5")
   env = {
     "CLAUDE_REVIEW_HANDOFF_PATH" => handoff_path,
     "CLAUDE_REVIEW_MARKER_PATH" => marker_path,
-    "CLAUDE_REVIEW_MODEL" => "claude-opus-5",
-    "CLAUDE_REVIEW_EFFORT" => "xhigh"
+    "CLAUDE_REVIEW_MODEL" => "claude-fable-5",
+    "CLAUDE_REVIEW_EFFORT" => "high"
   }
 
-  _stdout, stderr, status = invoke_handoff_hook(env, "hook_event_name" => "SessionStart", "source" => "startup", "model" => "claude-opus-5")
+  _stdout, stderr, status = invoke_handoff_hook(env, "hook_event_name" => "SessionStart", "source" => "startup", "model" => "claude-fable-5")
   assert(status.success?, "Claude SessionStart hook should succeed: #{stderr}")
 
   File.write(handoff_path, "stale review\n")
@@ -121,7 +121,7 @@ def test_claude_handoff_hook_tracks_interactive_turns
     env,
     "hook_event_name" => "Stop",
     "transcript_path" => transcript_path,
-    "effort" => { "level" => "xhigh" },
+    "effort" => { "level" => "high" },
     "last_assistant_message" => "First review"
   )
   assert(status.success?, "Claude Stop hook should succeed: #{stderr}")
@@ -130,15 +130,15 @@ def test_claude_handoff_hook_tracks_interactive_turns
   assert((File.stat(handoff_path).mode & 0o777) == 0o600, "handoff should be mode 0600")
 
   invoke_handoff_hook(env, "hook_event_name" => "UserPromptSubmit")
-  write_assistant_transcript(transcript_path, "claude-opus-5", "<synthetic>")
+  write_assistant_transcript(transcript_path, "claude-fable-5", "<synthetic>")
   invoke_handoff_hook(
     env,
     "hook_event_name" => "Stop",
     "transcript_path" => transcript_path,
-    "effort" => { "level" => "xhigh" },
+    "effort" => { "level" => "high" },
     "last_assistant_message" => "Review after a synthetic retry"
   )
-  assert(File.read(handoff_path) == "Review after a synthetic retry\n", "synthetic entries should not invalidate an Opus review")
+  assert(File.read(handoff_path) == "Review after a synthetic retry\n", "synthetic entries should not invalidate a Fable 5 review")
   assert(File.read(marker_path) == "0\n", "synthetic entries should not count as another model")
 
   invoke_handoff_hook(env, "hook_event_name" => "UserPromptSubmit")
@@ -147,7 +147,7 @@ def test_claude_handoff_hook_tracks_interactive_turns
     env,
     "hook_event_name" => "Stop",
     "transcript_path" => transcript_path,
-    "effort" => { "level" => "xhigh" },
+    "effort" => { "level" => "high" },
     "last_assistant_message" => "Synthetic-only review"
   )
   assert(File.read(marker_path) == "1\n", "synthetic-only transcripts should not supply model evidence")
@@ -167,46 +167,46 @@ def test_claude_handoff_hook_tracks_interactive_turns
   assert_includes(File.read(handoff_path), "rate limit reached", "failed handoff")
 
   invoke_handoff_hook(env, "hook_event_name" => "UserPromptSubmit")
-  write_assistant_transcript(transcript_path, "claude-opus-5", "claude-sonnet-5")
+  write_assistant_transcript(transcript_path, "claude-fable-5", "claude-sonnet-5")
   invoke_handoff_hook(
     env,
     "hook_event_name" => "Stop",
     "transcript_path" => transcript_path,
-    "effort" => { "level" => "xhigh" },
+    "effort" => { "level" => "high" },
     "last_assistant_message" => "Mixed-model review"
   )
   assert(File.read(marker_path) == "1\n", "a mixed-model transcript should fail the handoff")
-  assert_includes(File.read(handoff_path), "not exclusively \"claude-opus-5\"", "mixed-model handoff")
+  assert_includes(File.read(handoff_path), "not exclusively \"claude-fable-5\"", "mixed-model handoff")
 
   invoke_handoff_hook(env, "hook_event_name" => "UserPromptSubmit")
   invoke_handoff_hook(
     env,
     "hook_event_name" => "Stop",
     "transcript_path" => File.join(dir, "missing.jsonl"),
-    "effort" => { "level" => "xhigh" },
+    "effort" => { "level" => "high" },
     "last_assistant_message" => "Unverifiable-model review"
   )
   assert(File.read(marker_path) == "1\n", "missing transcript model evidence should fail the handoff")
   assert_includes(File.read(handoff_path), "did not report an assistant model", "missing-model handoff")
 
   invoke_handoff_hook(env, "hook_event_name" => "UserPromptSubmit")
-  write_assistant_transcript(transcript_path, "claude-opus-5")
+  write_assistant_transcript(transcript_path, "claude-fable-5")
   invoke_handoff_hook(
     env,
     "hook_event_name" => "Stop",
     "transcript_path" => transcript_path,
-    "effort" => { "level" => "high" },
+    "effort" => { "level" => "xhigh" },
     "last_assistant_message" => "Wrong effort review"
   )
   assert(File.read(marker_path) == "1\n", "unexpected effort should fail the handoff")
-  assert_includes(File.read(handoff_path), "not \"xhigh\"", "unexpected effort handoff")
+  assert_includes(File.read(handoff_path), "not \"high\"", "unexpected effort handoff")
 
   invoke_handoff_hook(env, "hook_event_name" => "UserPromptSubmit")
   invoke_handoff_hook(
     env,
     "hook_event_name" => "Stop",
     "transcript_path" => transcript_path,
-    "effort" => "xhigh",
+    "effort" => "high",
     "last_assistant_message" => "Malformed effort review"
   )
   assert(File.read(marker_path) == "1\n", "malformed effort evidence should fail the handoff")
@@ -217,7 +217,7 @@ def test_claude_handoff_hook_tracks_interactive_turns
     env,
     "hook_event_name" => "Stop",
     "transcript_path" => transcript_path,
-    "effort" => { "level" => "xhigh" },
+    "effort" => { "level" => "high" },
     "last_assistant_message" => "Corrected final review"
   )
   assert(File.read(handoff_path) == "Corrected final review\n", "corrected follow-up should replace the handoff")
@@ -228,7 +228,7 @@ def test_claude_handoff_hook_tracks_interactive_turns
   result = JSON.parse(stdout)
   assert(result["continue"] == false, "model mismatch should stop the session")
   assert(File.read(marker_path) == "1\n", "model mismatch should write status 1")
-  assert_includes(File.read(handoff_path), "not \"claude-opus-5\"", "model mismatch handoff")
+  assert_includes(File.read(handoff_path), "not \"claude-fable-5\"", "model mismatch handoff")
 ensure
   FileUtils.rm_rf(dir) if dir
 end
@@ -360,7 +360,7 @@ def test_supported_followup
     chdir: File.expand_path("..", __dir__)
   )
   assert(status.success?, "supported follow-up should succeed: #{stdout}#{stderr}")
-  assert_includes(stdout, "Existing Claude Opus 5 review resumed.", "follow-up launch")
+  assert_includes(stdout, "Existing Claude Fable 5 review resumed.", "follow-up launch")
   assert_includes(stdout, "Viewer: Cmux right split surface:followup", "follow-up viewer")
   assert_includes(stdout, "Claude review finished with marker 0.", "follow-up completion")
   assert(File.read(prompt_log) == "Review the corrected watcher", "follow-up should submit the supplied intent")
@@ -539,17 +539,18 @@ def test_default_claude_configuration
   output, status = dry_run(repo, "--intent", "Review defaults")
 
   assert(status.success?, "default Claude configuration dry-run should succeed")
-  assert_includes(output, "Claude model: claude-opus-5", "default model")
-  assert_includes(output, "Claude effort: xhigh", "default effort")
-  assert_includes(output, "Runner: native Claude TUI in a right-hand Cmux split or Ghostty tab", "native runner")
-  assert_includes(output, "Viewer selection: right-hand split inside Cmux; Ghostty tab otherwise", "viewer selection")
+  assert_includes(output, "Claude model: claude-fable-5", "default model")
+  assert_includes(output, "Claude effort: high", "default effort")
+  assert_includes(output, "Runner: native Claude TUI in a right-hand Cmux split, Ghostty right split, or Ghostty tab", "native runner")
+  assert_includes(output, "Viewer selection: right-hand split inside Cmux; Ghostty right split when already in Ghostty; Ghostty tab otherwise", "viewer selection")
+  assert_includes(output, "Current viewer: #{ClaudeVisibleSession.current_viewer_name}", "current viewer")
   assert_includes(output, "Claude tools: Read,Grep,Glob", "review tool boundary")
   assert_includes(output, "Permission mode: dontAsk", "permission mode")
   assert_includes(output, "Workspace: primary repository; private run directory is auxiliary only", "workspace selection")
   assert_includes(output, "Setting sources: explicit private settings only", "setting isolation")
-  assert_includes(output, "Selectable models: claude-opus-5", "model allowlist")
+  assert_includes(output, "Selectable models: claude-fable-5", "model allowlist")
   assert_includes(output, "Automatic model fallback: disabled", "automatic fallback")
-  assert_includes(output, "Handoff model validation: transcript must contain only claude-opus-5", "handoff model validation")
+  assert_includes(output, "Handoff model validation: transcript must contain only claude-fable-5", "handoff model validation")
   assert_includes(output, "Launch acknowledgement: required before reporting success", "launch acknowledgement")
   assert_includes(File.read(HELPER), '"CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK" => "1"', "fallback environment")
   assert(!output.include?("Bash"), "review tool boundary should exclude Bash")
@@ -559,9 +560,9 @@ def test_default_claude_configuration
   assert_includes(output, "Do not self-filter to high-severity only.", "report-all review prompt")
   assert_includes(output, "Use tools when needed to understand affected behavior", "review exploration prompt")
   assert_includes(output, "state the review limitation instead of claiming no actionable findings", "incomplete review prompt")
-  assert(!output.include?("Before reporting a finding, verify"), "Opus 5 prompt should not request redundant verification")
-  assert(!output.include?("unsafe or incomplete"), "Opus 5 prompt should not score plans as production checklists")
-  assert(!output.include?("Continue until material risks are assessed"), "Opus 5 prompt should not request over-verification")
+  assert(!output.include?("Before reporting a finding, verify"), "Fable 5 prompt should not request redundant verification")
+  assert(!output.include?("unsafe or incomplete"), "Fable 5 prompt should not score plans as production checklists")
+  assert(!output.include?("Continue until material risks are assessed"), "Fable 5 prompt should not request over-verification")
   assert(!output.match?(/at most \d+ tool calls/i), "review prompt should not contain a numeric tool-call budget")
 ensure
   FileUtils.rm_rf(repo) if repo
@@ -586,9 +587,11 @@ def test_native_viewer_selection
   write_executable(directory, "osascript", <<~SH)
     #!/bin/sh
     if [ "$1" = "-e" ]; then exit 0; fi
-    tee "$GHOSTTY_LOG" >/dev/null
+    tee -a "$GHOSTTY_LOG" >/dev/null
+    if [ "$1" = "-" ]; then exit 0; fi
     if [ -n "$LAUNCH_MARKER" ]; then printf '%s\n' started > "$LAUNCH_MARKER"; fi
     printf '%s\n' 'tab:test'
+    printf '%s\n' 'terminal:test'
   SH
 
   with_env(
@@ -656,9 +659,12 @@ def test_native_viewer_selection
     "CMUX_WORKSPACE_ID" => nil,
     "CMUX_SURFACE_ID" => nil,
     "CMUX_BUNDLED_CLI_PATH" => nil,
+    "TERM_PROGRAM" => nil,
     "GHOSTTY_LOG" => ghostty_log,
     "LAUNCH_MARKER" => launch_marker
   ) do
+    FileUtils.rm_f(ghostty_log)
+    FileUtils.rm_f(launch_marker)
     viewer = ClaudeVisibleSession.run_review(
       shell_command: "/tmp/review-run/start-review",
       run_dir: directory,
@@ -668,9 +674,54 @@ def test_native_viewer_selection
   end
   ghostty = File.read(ghostty_log)
   assert_includes(ghostty, "tell application \"Ghostty\"", "Ghostty AppleScript")
+  assert_includes(ghostty, "new tab in front window", "Ghostty tab")
+  assert(!ghostty.include?("split currentTerm direction right"), "Ghostty tab should not split")
   assert_includes(ghostty, "/tmp/review-run/start-review", "Ghostty command delivery")
   assert(!ghostty.include?("CLAUDE_REVIEW_HANDOFF_PATH"), "Ghostty should receive only the short launcher path")
   assert(!ghostty.downcase.include?("zellij"), "Ghostty viewer should not use Zellij")
+
+  with_env(
+    "PATH" => "#{directory}:#{ENV.fetch("PATH")}",
+    "CMUX_WORKSPACE_ID" => nil,
+    "CMUX_SURFACE_ID" => nil,
+    "CMUX_BUNDLED_CLI_PATH" => nil,
+    "TERM_PROGRAM" => "ghostty",
+    "GHOSTTY_LOG" => ghostty_log,
+    "LAUNCH_MARKER" => launch_marker
+  ) do
+    FileUtils.rm_f(ghostty_log)
+    FileUtils.rm_f(launch_marker)
+    viewer = ClaudeVisibleSession.run_review(
+      shell_command: "/tmp/review-run/start-review",
+      run_dir: directory,
+      launch_marker: launch_marker
+    )
+    assert(viewer[:label] == "Ghostty right split terminal:test", "inside Ghostty the viewer should open a right split")
+    FileUtils.rm_f(launch_marker)
+    previous_stderr = $stderr
+    captured_stderr = StringIO.new
+    begin
+      $stderr = captured_stderr
+      viewer = nil
+      with_env("LAUNCH_MARKER" => nil) do
+        viewer = ClaudeVisibleSession.open_ghostty_viewer(
+          "/tmp/review-run/start-review",
+          directory,
+          launch_marker,
+          launch_timeout: 0.01
+        )
+      end
+      assert(viewer.nil?, "Ghostty should reject a split whose launcher never acknowledges startup")
+    ensure
+      $stderr = previous_stderr
+    end
+    assert(!captured_stderr.string.include?("Close the empty or stalled"), "Ghostty timeout should close the split")
+  end
+  ghostty = File.read(ghostty_log)
+  assert_includes(ghostty, "split currentTerm direction right", "Ghostty right split")
+  assert_includes(ghostty, "close currentTerminal", "Ghostty split timeout cleanup")
+  assert(!ghostty.include?("new tab in front window"), "Ghostty split should not open a tab")
+  assert(!ghostty.include?("close tab currentTab"), "Ghostty split timeout should not close the parent tab")
 ensure
   FileUtils.rm_rf(directory) if directory
 end
