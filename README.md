@@ -4,14 +4,15 @@ A Codex skill that opens one read-only Claude Fable 5 review in a visible termin
 
 ## Requirements
 
-- macOS
+- macOS or Omarchy
 - Codex
 - Claude Code, signed in with access to Fable 5
-- Git, Ruby, and zsh
-- Cmux or Ghostty
-- Permission for Codex to run the launcher with host access so it can use the terminal app and your Claude login
+- Git, Ruby, and bash
+- On Mac: Cmux or Ghostty
+- On Omarchy: the `omarchy` CLI
+- Permission for Codex to run the launcher with host access so it can use the terminal and your Claude login
 
-Inside Cmux, Claude opens in a right-hand split. Inside Ghostty, it opens a right-hand split in the current tab. From the Codex app or anywhere else, it opens in a Ghostty tab.
+Cmux opens a right-hand split. Ghostty opens a right split when you are already in Ghostty, otherwise a tab. Omarchy opens a new terminal window.
 
 ## Install
 

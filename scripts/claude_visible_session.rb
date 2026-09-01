@@ -12,18 +12,21 @@ module ClaudeVisibleSession
 
   def preflight!
     ensure_required_command!("claude")
-    if cmux_context?
-      ensure_cmux_ready!
-    else
-      ensure_ghostty_ready!
-    end
+    return if cmux_context? && cmux_command_path
+    return if ghostty_available?
+    return if omarchy_available?
+
+    warn "No visible terminal available. Need Cmux, Ghostty, or omarchy."
+    exit 1
   end
 
   def run_review(shell_command:, run_dir:, launch_marker:, recovery_paths: {}, launch_timeout: LAUNCH_ACK_TIMEOUT)
-    viewer = if cmux_context?
+    viewer = if cmux_context? && cmux_command_path
                open_cmux_split(ensure_cmux_ready!, shell_command, launch_marker, launch_timeout: launch_timeout)
-             else
+             elsif ghostty_available?
                open_ghostty_viewer(shell_command, run_dir, launch_marker, launch_timeout: launch_timeout)
+             elsif omarchy_available?
+               open_omarchy_viewer(shell_command, launch_marker, launch_timeout: launch_timeout)
              end
 
     return viewer if viewer
@@ -45,13 +48,103 @@ module ClaudeVisibleSession
   end
 
   def current_viewer_name
-    if cmux_context?
+    if cmux_context? && cmux_command_path
       "Cmux right split"
-    elsif ghostty_context?
-      "Ghostty right split"
+    elsif ghostty_available?
+      ghostty_context? ? "Ghostty right split" : "Ghostty tab"
+    elsif omarchy_available?
+      "Omarchy terminal"
     else
-      "Ghostty tab"
+      "none"
     end
+  end
+
+  def omarchy_available?
+    command_available?("omarchy")
+  end
+
+  def desktop_session_env
+    return nil unless command_available?("systemctl")
+
+    listing, _stderr, status = run_command(
+      "systemctl",
+      "--user",
+      "show-environment",
+      allow_failure: true
+    )
+    return nil unless status.success? && !listing.empty?
+
+    names = listing.each_line.filter_map do |line|
+      name, = line.chomp.split("=", 2)
+      name unless name.nil? || name.empty?
+    end
+    return nil if names.empty?
+
+    stdout, _stderr, status = run_command(
+      "bash",
+      "-c",
+      'set -a; eval "$(systemctl --user show-environment)"; exec env -0',
+      allow_failure: true
+    )
+    return nil unless status.success? && !stdout.empty?
+
+    decoded = {}
+    stdout.split("\0").each do |entry|
+      next if entry.empty?
+
+      name, value = entry.split("=", 2)
+      decoded[name] = value if name && !value.nil?
+    end
+
+    env = {}
+    names.each do |name|
+      env[name] = decoded[name] if decoded.key?(name)
+    end
+    env.empty? ? nil : env
+  rescue Errno::ENOENT
+    nil
+  end
+
+  def start_script_path(shell_command)
+    Shellwords.split(shell_command.to_s).first
+  end
+
+  def open_omarchy_viewer(shell_command, launch_marker, launch_timeout: LAUNCH_ACK_TIMEOUT)
+    start_path = start_script_path(shell_command)
+    unless start_path && File.executable?(start_path)
+      warn "Claude review start script is missing: #{start_path.inspect}"
+      return nil
+    end
+
+    env = desktop_session_env
+    unless env
+      warn "Could not read the desktop session environment for the Omarchy terminal."
+      return nil
+    end
+
+    omarchy = command_path("omarchy")
+    begin
+      pid = Process.spawn(
+        env,
+        omarchy,
+        "launch",
+        "tui",
+        "--app-id=org.omarchy.claude-fable-5-review",
+        start_path,
+        unsetenv_others: true
+      )
+    rescue Errno::ENOENT
+      warn "omarchy not found at #{omarchy.inspect}."
+      return nil
+    end
+    Process.detach(pid)
+
+    unless wait_for_launch(launch_marker, timeout: launch_timeout)
+      warn "Opened an Omarchy terminal, but the Claude launcher did not acknowledge startup. The window was left open; close it before using --resume-run."
+      return nil
+    end
+
+    { label: "Omarchy terminal" }
   end
 
   def cmux_command_path
@@ -218,7 +311,7 @@ module ClaudeVisibleSession
   end
 
   def ghostty_available?
-    return false unless command_available?("osascript") && command_available?("zsh")
+    return false unless command_available?("osascript")
 
     _stdout, _stderr, status = run_command(
       "osascript",
@@ -229,20 +322,11 @@ module ClaudeVisibleSession
     status.success?
   end
 
-  def ensure_ghostty_ready!
-    ensure_required_command!("osascript")
-    ensure_required_command!("zsh")
-    return true if ghostty_available?
-
-    warn "Ghostty is unavailable, so the visible Claude review was not launched."
-    exit 1
-  end
-
   def open_ghostty_viewer(shell_command, run_dir, launch_marker, launch_timeout: LAUNCH_ACK_TIMEOUT)
     return nil unless ghostty_available?
 
     split = ghostty_context?
-    launch_command = "#{command_path("zsh").shellescape} -lc #{shell_command.shellescape}"
+    launch_command = start_script_path(shell_command) || shell_command
     create_surface = if split
                        <<~APPLESCRIPT
                          set currentTerm to focused terminal of selected tab of front window

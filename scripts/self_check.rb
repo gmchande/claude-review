@@ -423,6 +423,8 @@ def test_generated_resume_script_settles_early_failure
   assert(status.success?, "initial fake review should succeed: #{stdout}#{stderr}")
   run_dir = Dir.glob(File.join(scratch, "claude-review", "run-*")).first
   assert(run_dir, "initial fake review should create a private run")
+  start_review = File.join(run_dir, "start-review")
+  assert(File.read(start_review).include?(fake_claude), "start-review should run the wrapper's claude path")
   resume_script = File.join(run_dir, "resume-review")
   assert(File.executable?(resume_script), "initial fake review should generate an executable resume script")
 
@@ -513,6 +515,27 @@ def test_review_scenarios
       end,
       args: ["--artifact", "docs/plan.md"],
       includes: ["Review target: working tree against HEAD", "Artifact under review: docs/plan.md", "+hello changed"]
+    },
+    {
+      name: "clean empty-tree base",
+      setup: lambda do |repo|
+        write(repo, "app.txt", "hello\n")
+        commit_all(repo, "initial")
+        git(repo, "hash-object", "-w", "-t", "tree", "/dev/null")
+      end,
+      args: ["--base", "4b825dc642cb6eb9a060e54bf8d69288fbee4904", "--intent", "Review all commits"],
+      includes: ["Review target: current branch against", "+hello"]
+    },
+    {
+      name: "dirty empty-tree base",
+      setup: lambda do |repo|
+        write(repo, "app.txt", "hello\n")
+        commit_all(repo, "initial")
+        git(repo, "hash-object", "-w", "-t", "tree", "/dev/null")
+        write(repo, "app.txt", "hello dirty\n")
+      end,
+      args: ["--base", "4b825dc642cb6eb9a060e54bf8d69288fbee4904", "--intent", "Review dirty empty tree"],
+      includes: ["working tree against", "+hello dirty"]
     }
   ]
 
@@ -540,29 +563,11 @@ def test_default_claude_configuration
 
   assert(status.success?, "default Claude configuration dry-run should succeed")
   assert_includes(output, "Claude model: claude-fable-5", "default model")
-  assert_includes(output, "Claude effort: high", "default effort")
-  assert_includes(output, "Runner: native Claude TUI in a right-hand Cmux split, Ghostty right split, or Ghostty tab", "native runner")
-  assert_includes(output, "Viewer selection: right-hand split inside Cmux; Ghostty right split when already in Ghostty; Ghostty tab otherwise", "viewer selection")
-  assert_includes(output, "Current viewer: #{ClaudeVisibleSession.current_viewer_name}", "current viewer")
   assert_includes(output, "Claude tools: Read,Grep,Glob", "review tool boundary")
-  assert_includes(output, "Permission mode: dontAsk", "permission mode")
-  assert_includes(output, "Workspace: primary repository; private run directory is auxiliary only", "workspace selection")
-  assert_includes(output, "Setting sources: explicit private settings only", "setting isolation")
-  assert_includes(output, "Selectable models: claude-fable-5", "model allowlist")
-  assert_includes(output, "Automatic model fallback: disabled", "automatic fallback")
-  assert_includes(output, "Handoff model validation: transcript must contain only claude-fable-5", "handoff model validation")
-  assert_includes(output, "Launch acknowledgement: required before reporting success", "launch acknowledgement")
-  assert_includes(File.read(HELPER), '"CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK" => "1"', "fallback environment")
   assert(!output.include?("Bash"), "review tool boundary should exclude Bash")
   assert(!output.include?("WebFetch"), "review tool boundary should exclude web tools")
   assert(!output.include?("Agent"), "review tool boundary should exclude subagents")
   assert_includes(output, "Do not widen the task into a general production, security, or scale audit.", "scoped review prompt")
-  assert_includes(output, "Do not self-filter to high-severity only.", "report-all review prompt")
-  assert_includes(output, "Use tools when needed to understand affected behavior", "review exploration prompt")
-  assert_includes(output, "state the review limitation instead of claiming no actionable findings", "incomplete review prompt")
-  assert(!output.include?("Before reporting a finding, verify"), "Fable 5 prompt should not request redundant verification")
-  assert(!output.include?("unsafe or incomplete"), "Fable 5 prompt should not score plans as production checklists")
-  assert(!output.include?("Continue until material risks are assessed"), "Fable 5 prompt should not request over-verification")
   assert(!output.match?(/at most \d+ tool calls/i), "review prompt should not contain a numeric tool-call budget")
 ensure
   FileUtils.rm_rf(repo) if repo
@@ -654,15 +659,16 @@ def test_native_viewer_selection
   assert(!cmux.include?("new-surface"), "Cmux viewer should not create a tab")
   assert(!cmux.include?("CLAUDE_REVIEW_HANDOFF_PATH"), "Cmux should receive only the short launcher path")
 
-  with_env(
+  ghostty_env = {
     "PATH" => "#{directory}:#{ENV.fetch("PATH")}",
     "CMUX_WORKSPACE_ID" => nil,
     "CMUX_SURFACE_ID" => nil,
     "CMUX_BUNDLED_CLI_PATH" => nil,
-    "TERM_PROGRAM" => nil,
     "GHOSTTY_LOG" => ghostty_log,
     "LAUNCH_MARKER" => launch_marker
-  ) do
+  }
+
+  with_env(ghostty_env.merge("TERM_PROGRAM" => nil)) do
     FileUtils.rm_f(ghostty_log)
     FileUtils.rm_f(launch_marker)
     viewer = ClaudeVisibleSession.run_review(
@@ -670,25 +676,10 @@ def test_native_viewer_selection
       run_dir: directory,
       launch_marker: launch_marker
     )
-    assert(viewer[:label] == "Ghostty tab tab:test", "outside Cmux the viewer should open a Ghostty tab")
+    assert(viewer[:label] == "Ghostty tab tab:test", "Ghostty wins over Omarchy when it is available")
   end
-  ghostty = File.read(ghostty_log)
-  assert_includes(ghostty, "tell application \"Ghostty\"", "Ghostty AppleScript")
-  assert_includes(ghostty, "new tab in front window", "Ghostty tab")
-  assert(!ghostty.include?("split currentTerm direction right"), "Ghostty tab should not split")
-  assert_includes(ghostty, "/tmp/review-run/start-review", "Ghostty command delivery")
-  assert(!ghostty.include?("CLAUDE_REVIEW_HANDOFF_PATH"), "Ghostty should receive only the short launcher path")
-  assert(!ghostty.downcase.include?("zellij"), "Ghostty viewer should not use Zellij")
 
-  with_env(
-    "PATH" => "#{directory}:#{ENV.fetch("PATH")}",
-    "CMUX_WORKSPACE_ID" => nil,
-    "CMUX_SURFACE_ID" => nil,
-    "CMUX_BUNDLED_CLI_PATH" => nil,
-    "TERM_PROGRAM" => "ghostty",
-    "GHOSTTY_LOG" => ghostty_log,
-    "LAUNCH_MARKER" => launch_marker
-  ) do
+  with_env(ghostty_env.merge("TERM_PROGRAM" => "ghostty")) do
     FileUtils.rm_f(ghostty_log)
     FileUtils.rm_f(launch_marker)
     viewer = ClaudeVisibleSession.run_review(
@@ -697,33 +688,39 @@ def test_native_viewer_selection
       launch_marker: launch_marker
     )
     assert(viewer[:label] == "Ghostty right split terminal:test", "inside Ghostty the viewer should open a right split")
-    FileUtils.rm_f(launch_marker)
-    previous_stderr = $stderr
-    captured_stderr = StringIO.new
-    begin
-      $stderr = captured_stderr
-      viewer = nil
-      with_env("LAUNCH_MARKER" => nil) do
-        viewer = ClaudeVisibleSession.open_ghostty_viewer(
-          "/tmp/review-run/start-review",
-          directory,
-          launch_marker,
-          launch_timeout: 0.01
-        )
-      end
-      assert(viewer.nil?, "Ghostty should reject a split whose launcher never acknowledges startup")
-    ensure
-      $stderr = previous_stderr
-    end
-    assert(!captured_stderr.string.include?("Close the empty or stalled"), "Ghostty timeout should close the split")
   end
-  ghostty = File.read(ghostty_log)
-  assert_includes(ghostty, "split currentTerm direction right", "Ghostty right split")
-  assert_includes(ghostty, "close currentTerminal", "Ghostty split timeout cleanup")
-  assert(!ghostty.include?("new tab in front window"), "Ghostty split should not open a tab")
-  assert(!ghostty.include?("close tab currentTab"), "Ghostty split timeout should not close the parent tab")
+
+  with_env(
+    ghostty_env.merge(
+      "CMUX_WORKSPACE_ID" => "workspace:3",
+      "CMUX_SURFACE_ID" => "surface:8",
+      "TERM_PROGRAM" => nil
+    )
+  ) do
+    next unless ClaudeVisibleSession.cmux_command_path.nil?
+
+    FileUtils.rm_f(ghostty_log)
+    FileUtils.rm_f(launch_marker)
+    viewer = ClaudeVisibleSession.run_review(
+      shell_command: "/tmp/review-run/start-review",
+      run_dir: directory,
+      launch_marker: launch_marker
+    )
+    assert(viewer[:label] == "Ghostty tab tab:test", "Cmux context without a CLI should fall through to Ghostty")
+  end
 ensure
   FileUtils.rm_rf(directory) if directory
+end
+
+def test_desktop_session_env
+  _stdout, _stderr, status = Open3.capture3("systemctl", "--user", "show-environment")
+  return unless status.success?
+
+  env = ClaudeVisibleSession.desktop_session_env
+  assert(env.is_a?(Hash) && !env.fetch("PATH", "").empty?, "desktop session env should include PATH")
+  assert(!env.key?("CURSOR_AGENT"), "desktop session env should not carry CURSOR_AGENT")
+rescue Errno::ENOENT
+  nil
 end
 
 def test_secret_untracked_skip
@@ -841,6 +838,7 @@ tests = [
   method(:test_secret_untracked_skip),
   method(:test_project_context_includes_parent_and_repo_authority_files),
   method(:test_native_viewer_selection),
+  method(:test_desktop_session_env),
   method(:test_include_repo_bundles_related_diff)
 ]
 

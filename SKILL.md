@@ -1,6 +1,6 @@
 ---
 name: claude-review
-description: Single-session Claude Fable 5 review gate for a current diff, branch, plan, artifact, or coordinated multi-repo change. Launch one visible read-only Claude TUI in a right-hand Cmux split, a Ghostty right split, or a Ghostty tab, let the user steer it, independently judge its findings against the real files, and stop for approval before editing.
+description: Single-session Claude Fable 5 review gate for a current diff, branch, plan, artifact, or coordinated multi-repo change. Launch one visible read-only Claude TUI in Cmux, Ghostty, or an Omarchy terminal, let the user steer it, independently judge its findings against the real files, and stop for approval before editing.
 ---
 
 # Claude Review
@@ -15,7 +15,7 @@ Do not edit, format, generate, stage, commit, or push before the verification ch
 
 1. Run from the primary repo root.
 2. If this task already has a printed Claude session, keep using it. Never launch another review or retry a failed run without the user's explicit approval.
-3. Launch one review with host access. A sandboxed launch cannot use the Cmux control socket, Ghostty automation, or the user's Claude login. `--intent` names the slice and audience. Do not ask Claude to make the work "safe," "complete," or enterprise-grade.
+3. Launch one review with host access. A sandboxed launch cannot use the terminal app or the user's Claude login. `--intent` names the slice and audience. Do not ask Claude to make the work "safe," "complete," or enterprise-grade.
 
 ```sh
 /path/to/claude-review/scripts/claude_review.rb \
@@ -27,11 +27,11 @@ Useful options:
 - `--include-repo PATH` adds another repo's authority, status, diff, and eligible untracked text; repeat as needed.
 - `--plan PATH` supplies a plan or PRD and becomes plan-only when the worktree is clean.
 - `--artifact PATH` supplies a document or workflow and becomes artifact-only when the worktree is clean.
-- `--base REF` reviews committed primary-branch work when no worktree change is available.
+- `--base REF` reviews committed work against REF when no worktree change is available. An empty tree works when there is no merge-base.
 - `--resume-run PATH --intent TEXT` reuses the exact printed Claude session for an approved follow-up, opens it in the viewer selected from the current environment, and waits for that new turn.
 - `--dry-run` prints the bundle without launching Claude.
 
-Inside Cmux, the launcher opens a vertical terminal split on the right. Inside Ghostty, it opens a right-hand split in the current tab. Otherwise it opens a Ghostty tab. It does not use Zellij. The launcher prints the viewer, handoff path, marker path, and exact resume command.
+The script opens a visible Claude TUI: a Cmux right split, a Ghostty split or tab, or an Omarchy terminal window. It does not use Zellij. It prints the viewer, handoff path, marker path, and exact resume command, then waits on the marker. Marker `0` means the turn is done. The window may still be open.
 
 Claude starts in the primary repository, not the temporary run directory. The private run directory contains only the bundled request, per-run settings, launcher, launch acknowledgement, marker, and handoff. The launcher reports success only after `start-review` acknowledges that it executed.
 

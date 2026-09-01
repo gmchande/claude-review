@@ -51,7 +51,7 @@ options = {
 parser = OptionParser.new do |opts|
   opts.banner = "Usage: claude_review.rb [options]"
 
-  opts.on("--base REF", "Review primary branch changes against REF") { |value| options[:base] = value }
+  opts.on("--base REF", "Review committed work against REF; an empty tree is fine when there is no merge-base") { |value| options[:base] = value }
   opts.on("--intent TEXT", "What this slice is, in this project") { |value| options[:intent] = value }
   opts.on("--plan PATH", "Include a plan/PRD file as review context") { |value| options[:plan] = value }
   opts.on("--artifact PATH", "Include a repo artifact; artifact-only when the worktree is clean") { |value| options[:artifact] = value }
@@ -89,7 +89,24 @@ def git_ref_exists?(repo_root, ref)
 end
 
 def empty_tree_ref(repo_root)
-  git(repo_root, "hash-object", "-t", "tree", "/dev/null").strip
+  git(repo_root, "hash-object", "-w", "-t", "tree", "/dev/null").strip
+end
+
+def resolve_base(repo_root, base)
+  return base if git_ref_exists?(repo_root, base)
+
+  empty = empty_tree_ref(repo_root)
+  return empty if base == empty
+
+  warn "Base ref not found in #{repo_root}: #{base}"
+  exit 1
+end
+
+def merge_base(repo_root, base)
+  stdout, _stderr, status = run("git", "-C", repo_root, "merge-base", base, "HEAD", allow_failure: true)
+  return stdout.strip if status.success? && !stdout.strip.empty?
+
+  nil
 end
 
 def likely_text_file?(path)
@@ -243,13 +260,21 @@ rescue Errno::ENOENT, Errno::EACCES
   "### #{path}\n\nSkipped: file disappeared or became unreadable.\n"
 end
 
-def merge_base_for(repo_root, base)
-  stdout, stderr, status = run("git", "-C", repo_root, "merge-base", base, "HEAD", allow_failure: true)
-  return stdout.strip if status.success? && !stdout.strip.empty?
+def diff_args_for(repo_root, base: nil, dirty: false)
+  if base
+    ancestor = merge_base(repo_root, base)
+    if dirty
+      return [ancestor || base]
+    end
 
-  warn "Could not find a merge base between #{base.inspect} and HEAD."
-  warn stderr unless stderr.empty?
-  exit status.exitstatus || 1
+    return ancestor ? ["#{base}...HEAD"] : [base, "HEAD"]
+  end
+
+  if dirty
+    return git_ref_exists?(repo_root, "HEAD") ? ["HEAD"] : [empty_tree_ref(repo_root)]
+  end
+
+  nil
 end
 
 def truncate_text(text, max_bytes, label)
@@ -314,34 +339,28 @@ def repo_snapshot(repo_root, base: nil)
       warn "Cannot use --base #{base.inspect} before the repository has a HEAD commit: #{repo_root}"
       exit 1
     end
-    unless git_ref_exists?(repo_root, base)
-      warn "Base ref not found in #{repo_root}: #{base}"
-      exit 1
-    end
-
-    if dirty
-      comparison_ref = merge_base_for(repo_root, base)
-      target_label = "working tree against #{base} (merge base #{comparison_ref[0, 12]})"
-    else
-      comparison_ref = "#{base}...HEAD"
-      target_label = "current branch against #{base}"
-    end
-  elsif dirty
-    if git_ref_exists?(repo_root, "HEAD")
-      comparison_ref = "HEAD"
-      target_label = "working tree against HEAD"
-    else
-      comparison_ref = empty_tree_ref(repo_root)
-      target_label = "working tree against empty tree (unborn branch; no HEAD commit yet)"
-    end
-  else
-    comparison_ref = nil
-    target_label = "clean working tree"
+    base = resolve_base(repo_root, base)
   end
 
-  if comparison_ref
-    diff_stat = git(repo_root, "diff", "--stat", comparison_ref, "--")
-    diff_body = git(repo_root, "diff", "--no-ext-diff", comparison_ref, "--")
+  diff_args = diff_args_for(repo_root, base: base, dirty: dirty)
+  target_label =
+    if base && dirty && (ancestor = merge_base(repo_root, base))
+      "working tree against #{base} (merge base #{ancestor[0, 12]})"
+    elsif base && dirty
+      "working tree against #{base}"
+    elsif base
+      "current branch against #{base}"
+    elsif dirty && git_ref_exists?(repo_root, "HEAD")
+      "working tree against HEAD"
+    elsif dirty
+      "working tree against empty tree (unborn branch; no HEAD commit yet)"
+    else
+      "clean working tree"
+    end
+
+  if diff_args
+    diff_stat = git(repo_root, "diff", "--stat", *diff_args, "--")
+    diff_body = git(repo_root, "diff", "--no-ext-diff", *diff_args, "--")
     untracked = untracked_bundle(repo_root)
   else
     diff_stat = "(clean)"
@@ -484,7 +503,7 @@ end
 
 def claude_args(review_run, repo_roots, resume: false)
   args = [
-    "claude",
+    ClaudeVisibleSession.command_path("claude"),
     "--model",
     CLAUDE_MODEL,
     "--effort",
@@ -567,8 +586,8 @@ def run_visible_review(system_prompt, payload, repo_root, included_repo_roots)
   repo_roots = [repo_root, *included_repo_roots].uniq
   cmd = claude_interactive_shell_cmd(review_run, repo_roots)
   resume_cmd = claude_interactive_shell_cmd(review_run, repo_roots, resume: true)
-  write_private_file(review_run[:start], "#!/bin/zsh\n#{cmd}\n")
-  write_private_file(review_run[:resume], "#!/bin/zsh\n#{resume_cmd}\n")
+  write_private_file(review_run[:start], "#!/bin/bash\n#{cmd}\n")
+  write_private_file(review_run[:resume], "#!/bin/bash\n#{resume_cmd}\n")
   FileUtils.chmod(0o700, review_run[:start])
   FileUtils.chmod(0o700, review_run[:resume])
 
@@ -633,7 +652,7 @@ def run_visible_followup(run_dir, intent)
   command = [review_run[:resume], intent].shelljoin
   write_private_file(
     followup_start,
-    "#!/bin/zsh\numask 077\nrm -f #{review_run[:handoff].shellescape}\nprintf 'running\\n' > #{review_run[:marker].shellescape}\nprintf '%s\\n' \"$$\" > #{review_run[:launched].shellescape}\nexec #{command}\n"
+    "#!/bin/bash\numask 077\nrm -f #{review_run[:handoff].shellescape}\nprintf 'running\\n' > #{review_run[:marker].shellescape}\nprintf '%s\\n' \"$$\" > #{review_run[:launched].shellescape}\nexec #{command}\n"
   )
   FileUtils.chmod(0o700, followup_start)
 
@@ -780,8 +799,8 @@ PROMPT
 if options[:dry_run]
   puts "Claude model: #{CLAUDE_MODEL}"
   puts "Claude effort: #{CLAUDE_EFFORT}"
-  puts "Runner: native Claude TUI in a right-hand Cmux split, Ghostty right split, or Ghostty tab"
-  puts "Viewer selection: right-hand split inside Cmux; Ghostty right split when already in Ghostty; Ghostty tab otherwise"
+  puts "Runner: native Claude TUI in Cmux, Ghostty, or an Omarchy terminal"
+  puts "Viewer selection: Cmux if present; Ghostty if available; Omarchy otherwise"
   puts "Current viewer: #{ClaudeVisibleSession.current_viewer_name}"
   puts "Claude tools: #{CLAUDE_REVIEW_TOOLS}"
   puts "Permission mode: #{CLAUDE_PERMISSION_MODE}"
