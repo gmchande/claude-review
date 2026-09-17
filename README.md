@@ -1,3 +1,5 @@
+> **Superseded by [handoff](https://github.com/gmchande/handoff).** This skill is archived and no longer maintained.
+
 # claude-review
 
 A Codex skill that opens one read-only Claude Fable 5 review in a visible terminal, then returns Claude's findings to Codex for independent verification before any edits.
